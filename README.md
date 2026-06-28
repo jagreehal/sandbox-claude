@@ -63,6 +63,32 @@ sandbox-start my-project      # Restart a stopped container
 sandbox-stop my-project --rm  # Destroy (removes container + deploy key)
 ```
 
+## Faster setup: prebuilt golden images
+
+By default, `sandbox-setup` builds each golden image locally, which runs apt and
+toolchain installs inside a container and takes several minutes. Once a
+maintainer publishes signed images, setup instead **pulls a verified prebuilt
+image** and imports it (about a one-minute download).
+
+```bash
+# Pull verified prebuilt images (opt-in via a published release tag):
+SANDBOX_IMAGE_TAG=images-2026-06 sandbox-setup
+
+# Always build locally instead (the escape hatch):
+sandbox-setup --build
+```
+
+The pull path is **fail-closed**: the downloaded `SHA256SUMS` manifest is checked
+for authenticity (minisign, against the public key committed in [`keys/`](keys/))
+and each image for integrity (SHA-256). If anything fails to verify, setup
+imports nothing and falls back to a local build. An unverified image is never
+used. See [`lib/sandbox-images.sh`](lib/sandbox-images.sh) for the consumer logic
+and [`bin/sandbox-publish`](bin/sandbox-publish) for the maintainer pipeline.
+
+> **Status:** the build/`--build` escape hatch and the fail-closed gating are in
+> place and disabled by default. The Incus pull/import path is syntax-verified
+> and awaits one validation pass on a real Incus host before a release is cut.
+
 ## Table of Contents
 
 - [Architecture](#architecture)

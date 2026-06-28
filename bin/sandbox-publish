@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# sandbox-publish — (MAINTAINER) export built golden images as verified, signed
+# tarballs and upload them to a GitHub Release, so users' `sandbox-setup` can
+# PULL them (fast) instead of building locally (~10 min).
+#
+# The consumer side (sandbox-setup + lib/sandbox-images.sh) is fail-closed: it
+# refuses any image whose SHA256SUMS signature or checksum does not verify. This
+# script produces exactly those artifacts:
+#   golden-<stack>.tar.gz   one unified Incus image per stack
+#   SHA256SUMS              integrity manifest over the tarballs
+#   SHA256SUMS.minisig      minisign signature over the manifest (authenticity)
+#
+# Prerequisites:
+#   1. Golden images already built:   sandbox-setup --build
+#   2. gh authenticated with write access to the target repo
+#   3. A minisign keypair (see keys/README.md):
+#        minisign -G -p keys/minisign.pub -s ~/.sandbox/keys/minisign.key
+#      Commit keys/minisign.pub; keep the secret key OFF the repo.
+#
+# Usage:
+#   sandbox-publish --tag <release-tag> [--key <minisign.key>] [--stacks "base node"] [--repo owner/name]
+#
+# STATUS: syntax-verified. The Incus export path has not yet been exercised
+# end-to-end on a real Incus host — validate before relying on a published release.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+source "${SCRIPT_DIR}/../lib/sandbox-images.sh"
+
+STACKS_DIR="${SCRIPT_DIR}/../stacks"
+TAG=""
+SIGN_KEY="${HOME}/.sandbox/keys/minisign.key"
+STACKS=""
+REPO="${SANDBOX_IMAGE_REPO}"
+
+# ── Parse args ──────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag)    TAG="$2"; shift 2 ;;
+    --key)    SIGN_KEY="$2"; shift 2 ;;
+    --stacks) STACKS="$2"; shift 2 ;;
+    --repo)   REPO="$2"; shift 2 ;;
+    *) die "Unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$TAG" ]] || die "Usage: sandbox-publish --tag <release-tag> [--key <minisign.key>] [--stacks \"base node\"] [--repo owner/name]"
+require_vm
+require_gh
+require_command minisign
+
+# Default to every stack that has a script.
+if [[ -z "$STACKS" ]]; then
+  for f in "${STACKS_DIR}"/*.sh; do STACKS+=" $(basename "$f" .sh)"; done
+fi
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+info "Exporting golden images to ${WORKDIR}..."
+
+ASSETS=()
+for stack in $STACKS; do
+  golden_name="golden-${stack}"
+  pub_alias="pub-${golden_name}"
+  out="${WORKDIR}/${golden_name}.tar.gz"
+
+  # Skip stacks that aren't built — publishing must not invent an image.
+  if ! vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
+    warn "${golden_name}/ready not found — skipping (build it first with: sandbox-setup --build)"
+    continue
+  fi
+
+  info "Publishing ${golden_name}/ready -> unified image..."
+  vm_exec "incus publish ${golden_name}/ready --alias ${pub_alias} --reuse" \
+    || { warn "incus publish failed for ${golden_name} — skipping"; continue; }
+
+  vm_exec "rm -f /tmp/${golden_name}.tar.gz; incus image export ${pub_alias} /tmp/${golden_name}" \
+    || { warn "incus image export failed for ${golden_name} — skipping"; vm_exec "incus image delete ${pub_alias} 2>/dev/null || true"; continue; }
+
+  vm_get_file "/tmp/${golden_name}.tar.gz" "$out" \
+    || { warn "could not retrieve ${golden_name}.tar.gz from VM — skipping"; }
+  vm_exec "incus image delete ${pub_alias} 2>/dev/null || true; rm -f /tmp/${golden_name}.tar.gz"
+
+  [[ -s "$out" ]] && { ASSETS+=("$out"); ok "exported ${golden_name}.tar.gz"; }
+done
+
+[[ ${#ASSETS[@]} -gt 0 ]] || die "No images exported — nothing to publish."
+
+# ── Integrity manifest + authenticity signature ────────────────────
+info "Writing SHA256SUMS over ${#ASSETS[@]} image(s)..."
+(
+  cd "$WORKDIR"
+  if command -v sha256sum &>/dev/null; then sha256sum golden-*.tar.gz > SHA256SUMS
+  else shasum -a 256 golden-*.tar.gz > SHA256SUMS; fi
+)
+
+[[ -f "$SIGN_KEY" ]] || die "minisign secret key not found at ${SIGN_KEY} (generate one — see keys/README.md)"
+info "Signing SHA256SUMS with minisign..."
+minisign -Sm "${WORKDIR}/SHA256SUMS" -s "$SIGN_KEY" \
+  || die "minisign signing failed"
+
+# ── Upload to a GitHub Release ─────────────────────────────────────
+info "Uploading release ${TAG} to ${REPO}..."
+if gh release view "$TAG" -R "$REPO" &>/dev/null; then
+  gh release upload "$TAG" -R "$REPO" --clobber \
+    "${ASSETS[@]}" "${WORKDIR}/SHA256SUMS" "${WORKDIR}/SHA256SUMS.minisig"
+else
+  gh release create "$TAG" -R "$REPO" \
+    --title "Golden images ${TAG}" \
+    --notes "Prebuilt, signed sandbox golden images. Verified by sandbox-setup against keys/minisign.pub." \
+    "${ASSETS[@]}" "${WORKDIR}/SHA256SUMS" "${WORKDIR}/SHA256SUMS.minisig"
+fi
+
+ok "Published ${#ASSETS[@]} image(s) to ${REPO}@${TAG}"
+echo ""
+echo "Users now pull verified prebuilt images with:"
+echo "  SANDBOX_IMAGE_TAG=${TAG} sandbox-setup"

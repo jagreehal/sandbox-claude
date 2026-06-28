@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # sandbox-setup — One-time setup: OrbStack machine + Incus + egress rules + golden images
-# Usage: sandbox-setup [--rebuild <stack>]
+# Usage: sandbox-setup [--rebuild <stack>] [--build]
+#   --rebuild <stack>  Rebuild a specific golden image (or "all"), ignoring the skip check.
+#   --build            Always build golden images locally; never pull prebuilt images.
+#                      (Default: pull a verified prebuilt image when one is published,
+#                       falling back to a local build. See lib/sandbox-images.sh.)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+source "${SCRIPT_DIR}/../lib/sandbox-images.sh"
 
 STACKS_DIR="${SCRIPT_DIR}/../stacks"
 REBUILD_STACK=""
+FORCE_BUILD=0   # --build: always build golden images locally, never pull prebuilt
 
 # ── Parse args ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild) REBUILD_STACK="$2"; shift 2 ;;
+    --build)   FORCE_BUILD=1; shift ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -151,25 +158,24 @@ deploy_squid_config
 vm_exec "systemctl enable squid 2>/dev/null && systemctl start squid 2>/dev/null || systemctl restart squid 2>/dev/null || true"
 ok "Squid proxy ready (idle — no traffic until --restrict-domains is used)"
 
-# ── Step 5: Build golden images ────────────────────────────────────
+# ── Step 5: Acquire golden images ──────────────────────────────────
 echo ""
-info "Step 6: Building golden images..."
+if [[ "$FORCE_BUILD" == 1 ]]; then
+  info "Step 6: Building golden images locally (--build)..."
+else
+  info "Step 6: Acquiring golden images (pull verified prebuilt, else build locally)..."
+fi
 
-build_golden() {
+# build_golden_local: the slow, always-correct path — launch a container, run
+# the stack script inside, snapshot 'ready'. Used when pulling is disabled
+# (--build), no prebuilt image is published, or a pull fails verification.
+build_golden_local() {
   local stack="$1"
   local golden_name="golden-${stack}"
   local stack_script="${STACKS_DIR}/${stack}.sh"
 
   if [[ ! -f "$stack_script" ]]; then
     die "Stack script not found: ${stack_script}"
-  fi
-
-  # Check if already built (unless --rebuild)
-  if [[ "$REBUILD_STACK" != "$stack" && "$REBUILD_STACK" != "all" ]]; then
-    if vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
-      ok "${golden_name}/ready already exists, skipping"
-      return 0
-    fi
   fi
 
   # Clean up existing if rebuilding
@@ -220,14 +226,35 @@ build_golden() {
   ok "${golden_name}/ready created"
 }
 
-# Always build base first
-build_golden "base"
+# acquire_golden: skip if already built; otherwise pull a verified prebuilt
+# image when available (and not --build), else build locally. The pull is
+# fail-closed — a failed or unverifiable pull falls back to a local build.
+acquire_golden() {
+  local stack="$1"
+  local golden_name="golden-${stack}"
 
-# Build variant stacks
+  # Skip if already built (unless this stack is being rebuilt)
+  if [[ "$REBUILD_STACK" != "$stack" && "$REBUILD_STACK" != "all" ]]; then
+    if vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
+      ok "${golden_name}/ready already exists, skipping"
+      return 0
+    fi
+  fi
+
+  if [[ "$FORCE_BUILD" != 1 ]] && pull_golden_image "$stack"; then
+    return 0
+  fi
+  build_golden_local "$stack"
+}
+
+# Base first: variants clone from golden-base on the local build path.
+acquire_golden "base"
+
+# Variant stacks
 for stack_file in "${STACKS_DIR}"/*.sh; do
   stack_name="$(basename "$stack_file" .sh)"
   [[ "$stack_name" == "base" ]] && continue
-  build_golden "$stack_name"
+  acquire_golden "$stack_name"
 done
 
 echo ""
