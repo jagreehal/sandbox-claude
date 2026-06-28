@@ -30,32 +30,40 @@ done
 require_sandbox
 
 # ── Build the command to run in each container ──────────────────────
-build_session_cmd() {
+# build_session_argv populates the SESSION_ARGV array (bash can't return one).
+# The direct single-container path execs the array as-is — no eval, no quoting.
+# The tmux path needs a single command string per pane, so build_session_cmd
+# renders the same array with POSIX-safe single-quoting.
+SESSION_ARGV=()
+build_session_argv() {
   local name="$1"
   local container
   container=$(container_name "$name")
 
-  local exec_prefix
+  SESSION_ARGV=()
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    exec_prefix="orb run -m ${SANDBOX_MACHINE} sudo"
-  else
-    exec_prefix=""
+    SESSION_ARGV+=(orb run -m "${SANDBOX_MACHINE}" sudo)
   fi
-
-  local user_flags="--user ${SANDBOX_UID} --group ${SANDBOX_GID} --cwd ${WORKSPACE_DIR} --env HOME=${SANDBOX_USER_HOME}"
+  SESSION_ARGV+=(incus exec "${container}"
+    --user "${SANDBOX_UID}" --group "${SANDBOX_GID}"
+    --cwd "${WORKSPACE_DIR}" --env "HOME=${SANDBOX_USER_HOME}" --)
 
   case "$MODE" in
-    shell)
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login"
-      ;;
-    claude)
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login -c 'claude --dangerously-skip-permissions'"
-      ;;
-    cmd)
-      local escaped_cmd="${CMD//\'/\'\\\'\'}"
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login -c '${escaped_cmd}'"
-      ;;
+    shell)  SESSION_ARGV+=(bash --login) ;;
+    claude) SESSION_ARGV+=(bash --login -c 'claude --dangerously-skip-permissions') ;;
+    cmd)    SESSION_ARGV+=(bash --login -c "$CMD") ;;
   esac
+}
+
+# Single-quote one argument so any POSIX sh (tmux's command runner) re-parses it
+# back to the original literal.
+_shquote() { local s="${1//\'/\'\\\'\'}"; printf "'%s'" "$s"; }
+
+build_session_cmd() {
+  build_session_argv "$1"
+  local out="" a
+  for a in "${SESSION_ARGV[@]}"; do out+="$(_shquote "$a") "; done
+  printf '%s' "${out% }"
 }
 
 # ── Validate all containers exist and are running ───────────────────
@@ -70,7 +78,8 @@ done
 
 # ── Single container: direct session ────────────────────────────────
 if [[ ${#NAMES[@]} -eq 1 ]]; then
-  eval "exec $(build_session_cmd "${NAMES[0]}")"
+  build_session_argv "${NAMES[0]}"
+  exec "${SESSION_ARGV[@]}"
 fi
 
 # ── Multiple containers: tmux ───────────────────────────────────────

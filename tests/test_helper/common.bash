@@ -11,7 +11,8 @@ PROJECT_ROOT="$(cd "${TEST_HELPER_DIR}/../.." && pwd)"
 
 # Source sandbox-common.sh for access to pure functions.
 # This will run detect_platform() at source time, which is fine on macOS/Linux.
-# It also sets OUTBOUND_IFACE, which is harmless for unit tests.
+# The outbound interface is resolved lazily (outbound_iface), so sourcing does
+# not shell out to `ip route`.
 SCRIPT_DIR="${PROJECT_ROOT}/bin"
 source "${PROJECT_ROOT}/lib/sandbox-common.sh"
 

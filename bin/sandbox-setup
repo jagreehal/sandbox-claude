@@ -32,7 +32,7 @@ require_command ssh-keygen
 gh auth status &>/dev/null 2>&1 || warn "gh not authenticated — deploy key automation won't work until you run 'gh auth login'"
 ok "Prerequisites OK (platform: ${SANDBOX_PLATFORM})"
 
-# ── Step 2: OrbStack machine ───────────────────────────────────────
+# ── Step 1: OrbStack machine ───────────────────────────────────────
 echo ""
 if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
   info "Step 1: OrbStack machine '${SANDBOX_MACHINE}'..."
@@ -47,7 +47,7 @@ else
   ok "Running directly on Linux"
 fi
 
-# ── Step 3: Install Incus ──────────────────────────────────────────
+# ── Step 2: Install Incus ──────────────────────────────────────────
 echo ""
 info "Step 2: Installing Incus..."
 vm_run bash << 'INCUS_SETUP'
@@ -104,7 +104,7 @@ echo "Incus initialized: $(incus version)"
 INCUS_SETUP
 ok "Incus ready"
 
-# ── Step 3b: Container network isolation ──────────────────────────
+# ── Step 3: Container network isolation ───────────────────────────
 echo ""
 info "Step 3: Enforcing container network isolation..."
 vm_exec "
@@ -117,40 +117,13 @@ ok "Container isolation active (port_isolation + ipv4/ipv6 filtering)"
 # ── Step 4: Egress filtering ───────────────────────────────────────
 echo ""
 info "Step 4: Applying egress filtering rules..."
-_OIFACE="${OUTBOUND_IFACE}"
-vm_run bash << EGRESS
-set -e
-
-if iptables -L FORWARD -n 2>/dev/null | grep -q "incusbr0.*DROP"; then
-  echo "Egress rules already applied"
-  exit 0
-fi
-
-# Default deny outbound from containers
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -j DROP
-
-# Allow DNS (TCP + UDP)
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p udp --dport 53 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p tcp --dport 53 -j ACCEPT
-
-# Allow HTTP
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p tcp --dport 80 -j ACCEPT
-
-# Allow HTTPS (TCP + UDP for HTTP/3 QUIC)
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p tcp --dport 443 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p udp --dport 443 -j ACCEPT
-
-# Allow SSH (git over SSH)
-iptables -I FORWARD -i incusbr0 -o '${_OIFACE}' -p tcp --dport 22 -j ACCEPT
-
-# Allow established/related return traffic
-iptables -I FORWARD -i '${_OIFACE}' -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-echo "Egress rules applied"
-EGRESS
+# The global default-deny floor lives in one place (ensure_global_egress_rules)
+# and is re-applied by every sandbox-start, so it survives a reboot. See
+# lib/sandbox-common.sh.
+ensure_global_egress_rules
 ok "Egress filtering active"
 
-# ── Step 3b: Domain filtering proxy (Squid) ───────────────────────
+# ── Step 5: Domain filtering proxy (Squid) ────────────────────────
 echo ""
 info "Step 5: Installing domain filtering proxy (Squid)..."
 ensure_squid_installed
@@ -158,7 +131,7 @@ deploy_squid_config
 vm_exec "systemctl enable squid 2>/dev/null && systemctl start squid 2>/dev/null || systemctl restart squid 2>/dev/null || true"
 ok "Squid proxy ready (idle — no traffic until --restrict-domains is used)"
 
-# ── Step 5: Acquire golden images ──────────────────────────────────
+# ── Step 6: Acquire golden images ──────────────────────────────────
 echo ""
 if [[ "$FORCE_BUILD" == 1 ]]; then
   info "Step 6: Building golden images locally (--build)..."

@@ -4,8 +4,17 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
-NAME="${1:?Usage: sandbox-stop <name> [--rm]}"
-REMOVE="${2:-}"
+# Accept `--rm` before or after the name (sandbox-stop --rm foo == sandbox-stop foo --rm).
+NAME=""
+REMOVE=""
+for arg in "$@"; do
+  case "$arg" in
+    --rm) REMOVE="--rm" ;;
+    -*)   die "Unknown flag: $arg" ;;
+    *)    if [[ -z "$NAME" ]]; then NAME="$arg"; else die "Unexpected argument: $arg"; fi ;;
+  esac
+done
+[[ -n "$NAME" ]] || die "Usage: sandbox-stop <name> [--rm]"
 CONTAINER=$(container_name "$NAME")
 
 require_vm

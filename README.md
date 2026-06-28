@@ -361,6 +361,8 @@ sandbox-start proj git@github.com:me/repo.git --restrict-domains
 
 When called with the name of a **stopped** container, `sandbox-start` restarts it in-place -- re-applying transient state (SSH agent, domain filtering, iptables rules) from preserved metadata. The container filesystem, Incus config, proxy devices, and deploy keys on disk are all preserved across stop/start cycles.
 
+Every `sandbox-start` (create or restart) also re-asserts the global default-deny egress floor on `incusbr0` before the container is networked. A VM or host reboot clears the live iptables ruleset, but containers do not autostart, so nothing reaches the network until the next `sandbox-start` re-establishes the cage. The egress filter does not silently fail open after a reboot.
+
 ```bash
 # Bare restart (re-applies SSH agent + domain filtering from saved config)
 sandbox-start my-project
@@ -649,7 +651,7 @@ The `~/.sandbox/` directory (including `env` and `keys/`) lives outside the repo
 
 ### Domain-Based Egress Filtering
 
-By default, containers can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [sandbox-start](#sandbox-start) flags). Uses Squid in SNI peek/splice mode — inspects the TLS ClientHello to read the target domain, then splices or rejects the connection. No decryption, no MITM, no CA cert needed. QUIC (UDP 443) is blocked for restricted containers. Unrestricted containers are unaffected — their traffic never touches Squid.
+By default, containers can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [sandbox-start](#sandbox-start) flags). Uses Squid in SNI peek/splice mode — inspects the TLS ClientHello to read the target domain, then splices or rejects the connection. No decryption, no MITM, no CA cert needed. QUIC (UDP 443) is blocked for restricted containers. Unrestricted containers are unaffected — their traffic never touches Squid. This governs HTTPS only: SSH (22, for `git push`) and DNS (53) stay open to any host, so the allowlist limits where HTTPS goes, not all egress (see [Security Model](#security-model)).
 
 #### Domain File Format
 
@@ -716,7 +718,7 @@ Or create a project-specific file and pass it with `--domains-file`.
 | **SSH private keys** | Private keys live only in ssh-agent memory in the sandbox environment (VM on macOS, host on Linux). Key material never touches the container's disk. Each container has its own ssh-agent process — containers cannot see each other's keys. Keys are automatically cleaned up from GitHub when a container is destroyed with `--rm`. |
 | **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
 | **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
-| **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach HTTPS endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. |
+| **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach **HTTPS** endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. This filters HTTPS only; SSH (22) and DNS (53) stay open (see "What is NOT Protected"). |
 | **Port isolation** | Extra ports opened via `sandbox-expose` use slot-based offsets (`port + slot`) so each container maps to a unique host port. Conflict detection prevents two containers from binding the same host port. Opening port 5432 on `proj-alpha` (slot 3 → host 5435) does not conflict with `proj-beta` (slot 5 → host 5437). |
 
 ### What is NOT Protected by Default
@@ -727,6 +729,7 @@ Or create a project-specific file and pass it with `--domains-file`.
 | **Env var exposure** | Environment variables injected via `~/.sandbox/env` or `--env` are written to `/etc/profile.d/sandbox-env.sh` inside the container. An agent can read them. This is by design (agents need API keys to function), but be aware. |
 | **Deploy key write access** | Deploy keys are created with `-w` (write) access. An agent can push to the repo it was created for. |
 | **HTTPS traffic content** | Without `--restrict-domains`, egress filtering allows all HTTPS traffic — agents can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [Domain-Based Egress Filtering](#domain-based-egress-filtering)). |
+| **Non-HTTPS egress under `--restrict-domains`** | Domain filtering covers HTTPS (and blocks QUIC) only. SSH (22) and DNS (53) remain open to any host, because `git push` needs SSH to GitHub and containers need a resolver. A determined agent could therefore tunnel over SSH or exfiltrate via DNS even when domains are restricted. The allowlist constrains where HTTPS goes, not all egress. |
 | **Persistent container state** | Stopping a container preserves its filesystem. Anything the agent wrote remains until the container is destroyed with `--rm`. |
 
 ## Troubleshooting
