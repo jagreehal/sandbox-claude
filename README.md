@@ -16,6 +16,8 @@ Run Claude Code agents in fully isolated Incus containers on **macOS** (via OrbS
 
 ## Quickstart
 
+> **New here?** The [step-by-step Getting Started guide](docs/getting-started.md) walks you from install to running your first caged agent, with what is and isn't protected. The quickstart below is the condensed version.
+
 ### macOS Quickstart
 
 **Prerequisite:** Install [OrbStack](https://orbstack.dev/) (`brew install orbstack`).
@@ -361,7 +363,7 @@ sandbox-start proj git@github.com:me/repo.git --restrict-domains
 
 When called with the name of a **stopped** container, `sandbox-start` restarts it in-place -- re-applying transient state (SSH agent, domain filtering, iptables rules) from preserved metadata. The container filesystem, Incus config, proxy devices, and deploy keys on disk are all preserved across stop/start cycles.
 
-Every `sandbox-start` (create or restart) also re-asserts the global default-deny egress floor on `incusbr0` before the container is networked. A VM or host reboot clears the live iptables ruleset, but containers do not autostart, so nothing reaches the network until the next `sandbox-start` re-establishes the cage. The egress filter does not silently fail open after a reboot.
+The global default-deny egress floor on `incusbr0` is installed as a boot-time systemd unit (`sandbox-egress.service`) ordered before Incus starts instances, and is also applied on every `sandbox-start`. A reboot clears the live iptables ruleset and Incus restores previously-running containers, so the boot unit re-establishes the floor before any container is networked again. The egress filter does not silently fail open after a reboot.
 
 ```bash
 # Bare restart (re-applies SSH agent + domain filtering from saved config)
@@ -717,7 +719,7 @@ Or create a project-specific file and pass it with `--domains-file`.
 | **Per-container isolation** | Each container is a separate Incus system container with its own filesystem, process tree, and network namespace. At the network level, `security.port_isolation=true` on the default profile sets the kernel's `IFLA_BRPORT_ISOLATED` flag on each container's veth — containers can only communicate with the bridge gateway (for DNS/DHCP/NAT), not with each other. Combined with `security.ipv4_filtering` and `security.ipv6_filtering` for anti-spoofing. |
 | **SSH private keys** | Private keys live only in ssh-agent memory in the sandbox environment (VM on macOS, host on Linux). Key material never touches the container's disk. Each container has its own ssh-agent process — containers cannot see each other's keys. Keys are automatically cleaned up from GitHub when a container is destroyed with `--rm`. |
 | **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
-| **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
+| **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. The floor is re-applied on boot by `sandbox-egress.service` before Incus restores containers, so it survives a reboot. |
 | **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach **HTTPS** endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. This filters HTTPS only; SSH (22) and DNS (53) stay open (see "What is NOT Protected"). |
 | **Port isolation** | Extra ports opened via `sandbox-expose` use slot-based offsets (`port + slot`) so each container maps to a unique host port. Conflict detection prevents two containers from binding the same host port. Opening port 5432 on `proj-alpha` (slot 3 → host 5435) does not conflict with `proj-beta` (slot 5 → host 5437). |
 

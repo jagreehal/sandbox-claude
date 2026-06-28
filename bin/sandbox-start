@@ -103,10 +103,10 @@ done
 # ── Check for existing container (restart-or-create) ──────────────
 require_sandbox
 
-# Re-assert the global egress floor before networking any container. Idempotent
-# (a no-op when already present), this is what keeps the cage closed across a
-# VM/host reboot: the reboot clears the live iptables ruleset, but containers do
-# not autostart, so this restores the default-deny floor before the next start.
+# Ensure the global egress floor (and its boot unit) are installed and applied
+# before networking any container. Idempotent. The boot unit is what keeps the
+# cage closed across a reboot (Incus restores running containers on boot); this
+# call also covers a first run and propagates any update to the floor script.
 ensure_global_egress_rules
 
 CONTAINER=$(container_name "$NAME")
