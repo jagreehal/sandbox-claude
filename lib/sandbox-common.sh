@@ -609,59 +609,21 @@ cleanup_container_forward_rules() {
 # systemd unit ordered BEFORE incus starts instances, and also run it now. One
 # script is the single source of truth, invoked on boot and by every start.
 #
-# The floor script self-detects the outbound interface in the VM/host where it
-# runs (via the default route), so it stays correct without host-side plumbing.
+# The floor script (vm/sandbox-egress) self-detects the outbound interface in the
+# VM/host where it runs, so it needs no host-side plumbing. It and the unit are
+# real, shellcheck-covered repo files (not embedded strings): the cage is the
+# most security-critical code here and must be linted like everything else.
+#
+# Reinstalling on every call is deliberate: the in-VM cage always matches the
+# installed code, so an upgrade can never leave a stale floor running. It is one
+# extra VM round-trip against the dozen a start already makes.
 ensure_global_egress_rules() {
-  vm_run bash << 'EGRESS'
-set -e
-
-# 1. Install the floor script — the single source of truth for the rules.
-#    Idempotent via `iptables -C` (note: `iptables -L -n` omits the interface
-#    column, so a substring match would never fire and would re-insert forever).
-cat > /usr/local/sbin/sandbox-egress << 'FLOOR'
-#!/usr/bin/env bash
-# Sandbox global egress floor: default-deny container egress on incusbr0 except
-# DNS/HTTP/HTTPS/SSH. Idempotent. Run on boot (sandbox-egress.service, before
-# Incus networks containers) and by every sandbox-start.
-set -e
-oiface="$(ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-[ -n "$oiface" ] || { echo "sandbox-egress: no default route; cannot apply egress floor" >&2; exit 1; }
-iptables -C FORWARD -i incusbr0 -o "$oiface" -j DROP 2>/dev/null && exit 0
-iptables -I FORWARD -i incusbr0 -o "$oiface" -j DROP
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 53 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 53 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 80 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 443 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 443 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 22 -j ACCEPT
-iptables -I FORWARD -i "$oiface" -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
-FLOOR
-chmod +x /usr/local/sbin/sandbox-egress
-
-# 2. Install + enable the boot unit. Ordered before incus(-startup) so the floor
-#    is in place before any restored container is networked. Waits for a default
-#    route so the interface detection succeeds.
-cat > /etc/systemd/system/sandbox-egress.service << 'UNIT'
-[Unit]
-Description=Sandbox container egress floor (default-deny on incusbr0)
-Wants=network-online.target
-After=network-online.target
-Before=incus.service incus-startup.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/sandbox-egress
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable sandbox-egress.service >/dev/null 2>&1 || true
-
-# 3. Apply the floor now (idempotent).
-/usr/local/sbin/sandbox-egress
-EGRESS
+  local vm_dir="${SCRIPT_DIR}/../vm"
+  # Push the floor script and boot unit into the VM/host (values via stdin, never
+  # interpolated), then reload, enable, and apply.
+  vm_run bash -c 'cat > /usr/local/sbin/sandbox-egress && chmod 0755 /usr/local/sbin/sandbox-egress' < "${vm_dir}/sandbox-egress"
+  vm_run bash -c 'cat > /etc/systemd/system/sandbox-egress.service' < "${vm_dir}/sandbox-egress.service"
+  vm_run bash -c 'systemctl daemon-reload; systemctl enable sandbox-egress.service >/dev/null 2>&1 || true; /usr/local/sbin/sandbox-egress'
 }
 
 # ── Source this library ─────────────────────────────────────────────

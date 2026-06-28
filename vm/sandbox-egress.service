@@ -1,0 +1,15 @@
+[Unit]
+Description=Sandbox container egress floor (default-deny on incusbr0)
+# Apply the floor before Incus brings restored containers onto the network.
+# Wait for a default route so the floor script can detect the outbound interface.
+Wants=network-online.target
+After=network-online.target
+Before=incus.service incus-startup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sandbox-egress
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

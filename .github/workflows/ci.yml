@@ -25,7 +25,7 @@ jobs:
       # analysed in the context of each entry script (suppresses false-positive
       # SC2034 on shared lib constants); --severity=warning ignores info/style.
       - name: ShellCheck
-        run: shellcheck -x --severity=warning bin/* stacks/*.sh install.sh tests/validate-screening.sh
+        run: shellcheck -x --severity=warning bin/* stacks/*.sh vm/sandbox-egress install.sh tests/validate-screening.sh
 
   unit:
     name: Unit tests (bats)
