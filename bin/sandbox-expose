@@ -88,9 +88,7 @@ for p in "${proto_list[@]}"; do
 done
 
 # Get container IP for egress rules
-CONTAINER_IP=$(vm_exec "
-  incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
-")
+CONTAINER_IP=$(get_container_ip "$CONTAINER")
 [[ -n "$CONTAINER_IP" ]] || die "Could not determine container IP"
 
 add_port() {
@@ -106,7 +104,7 @@ add_port() {
 
   # Outbound: container → external
   vm_exec "
-    sudo iptables -I FORWARD -s '${CONTAINER_IP}' -o '${OUTBOUND_IFACE}' -p ${p} --dport ${PORT} -j ACCEPT
+    iptables -I FORWARD -s '${CONTAINER_IP}' -o '$(outbound_iface)' -p ${p} --dport ${PORT} -j ACCEPT
   "
 }
 

@@ -36,7 +36,20 @@ detect_outbound_iface() {
 }
 
 detect_platform
-OUTBOUND_IFACE=$(detect_outbound_iface)
+
+# Outbound interface, resolved lazily on first use and cached. Read-only commands
+# (sandbox-list, sandbox) never pay for the lookup; the commands that write
+# iptables rules (setup, start, expose) call outbound_iface and fail fast with a
+# clear message if no default route exists, rather than silently emitting `-o ''`.
+_OUTBOUND_IFACE=""
+outbound_iface() {
+  if [[ -z "$_OUTBOUND_IFACE" ]]; then
+    _OUTBOUND_IFACE=$(detect_outbound_iface)
+    [[ -n "$_OUTBOUND_IFACE" ]] \
+      || die "Could not detect the outbound network interface (no default route?). See README Troubleshooting: 'Outbound Interface Not Detected'."
+  fi
+  printf '%s' "$_OUTBOUND_IFACE"
+}
 
 # ── Colour helpers (no-op if not a terminal) ────────────────────────
 if [[ -t 1 ]]; then
@@ -339,7 +352,8 @@ inject_env() {
   shift
   local extra_envs=("$@")
 
-  # Read ~/.sandbox/env if it exists
+  # Env lines to set this call: ~/.sandbox/env (the persistent base) plus any
+  # --env overrides, normalised below to `export KEY=VALUE`.
   local env_lines=()
   if [[ -f "${SANDBOX_ENV_FILE}" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -348,29 +362,43 @@ inject_env() {
       env_lines+=("$line")
     done < "${SANDBOX_ENV_FILE}"
   fi
-
-  # Add extra env overrides
   if [[ ${#extra_envs[@]} -gt 0 ]]; then
     for e in "${extra_envs[@]}"; do
       env_lines+=("$e")
     done
   fi
 
-  # Inject into /etc/profile.d so env vars are available to all login shells
-  if [[ ${#env_lines[@]} -gt 0 ]]; then
-    local tmpfile
-    tmpfile=$(mktemp)
-    for line in "${env_lines[@]}"; do
-      if [[ "$line" != export\ * ]]; then
-        printf 'export %s\n' "$line" >> "$tmpfile"
-      else
-        printf '%s\n' "$line" >> "$tmpfile"
-      fi
-    done
-    # Pipe content into container via stdin — no shell interpolation of values
-    vm_run incus exec "${container}" -- bash -c 'cat >> /etc/profile.d/sandbox-env.sh' < "$tmpfile"
-    rm -f "$tmpfile"
-  fi
+  [[ ${#env_lines[@]} -gt 0 ]] || return 0
+
+  # Build the export block and the list of keys it sets. We rewrite the managed
+  # file as (existing exports whose key we are NOT setting) + (this block), so
+  # repeated restarts never accumulate duplicate lines, while values set on an
+  # earlier run survive a bare restart.
+  local tmpfile keys=()
+  tmpfile=$(mktemp)
+  local line body
+  for line in "${env_lines[@]}"; do
+    body="${line#export }"
+    keys+=("${body%%=*}")
+    if [[ "$line" == export\ * ]]; then
+      printf '%s\n' "$line" >> "$tmpfile"
+    else
+      printf 'export %s\n' "$line" >> "$tmpfile"
+    fi
+  done
+
+  # Keys are env-var names ([A-Za-z_][A-Za-z0-9_]*), safe to splice into the ERE.
+  local drop_pattern
+  drop_pattern=$(IFS='|'; echo "${keys[*]}")
+  # Values arrive via stdin (the tmpfile), never interpolated into the command.
+  vm_run incus exec "${container}" -- bash -c "
+    f=/etc/profile.d/sandbox-env.sh
+    touch \"\$f\"
+    grep -vE '^export (${drop_pattern})=' \"\$f\" > \"\${f}.tmp\" || true
+    cat >> \"\${f}.tmp\"
+    mv \"\${f}.tmp\" \"\$f\"
+  " < "$tmpfile"
+  rm -f "$tmpfile"
 }
 
 # ── Container metadata helpers ─────────────────────────────────────
@@ -529,10 +557,11 @@ ACL_EOF
 # Remove per-container Squid ACL and domains file, then reload
 cleanup_container_domain_filter() {
   local container="$1"
+  # vm_exec already runs as root (vm_run owns sudo); no inner sudo needed.
   vm_exec "
-    sudo rm -f /etc/squid/sandbox/containers/${container}.conf \
+    rm -f /etc/squid/sandbox/containers/${container}.conf \
           /etc/squid/sandbox/containers/${container}.domains
-    sudo squid -k reconfigure 2>/dev/null || sudo systemctl reload squid 2>/dev/null || true
+    squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true
   " 2>/dev/null || true
 }
 
@@ -540,9 +569,9 @@ cleanup_container_domain_filter() {
 redirect_container_to_squid() {
   local container_ip="$1"
   vm_exec "
-    sudo iptables -t nat -A PREROUTING -s '${container_ip}/32' -p tcp --dport 443 \
+    iptables -t nat -A PREROUTING -s '${container_ip}/32' -p tcp --dport 443 \
       -j REDIRECT --to-port ${SQUID_PORT}
-    sudo iptables -t nat -A PREROUTING -s '${container_ip}/32' -p tcp --dport 80 \
+    iptables -t nat -A PREROUTING -s '${container_ip}/32' -p tcp --dport 80 \
       -j REDIRECT --to-port ${SQUID_PORT}
   "
 }
@@ -551,8 +580,8 @@ redirect_container_to_squid() {
 remove_container_squid_redirect() {
   local container_ip="$1"
   vm_exec "
-    sudo iptables -t nat -S PREROUTING 2>/dev/null | grep '${container_ip}' | while read -r rule; do
-      sudo iptables -t nat \$(echo \"\$rule\" | sed 's/^-A/-D/')
+    iptables -t nat -S PREROUTING 2>/dev/null | grep '${container_ip}' | while read -r rule; do
+      iptables -t nat \$(echo \"\$rule\" | sed 's/^-A/-D/')
     done
   " 2>/dev/null || true
 }
@@ -561,10 +590,52 @@ remove_container_squid_redirect() {
 cleanup_container_forward_rules() {
   local container_ip="$1"
   vm_exec "
-    sudo iptables -S FORWARD 2>/dev/null | grep '${container_ip}' | while read -r rule; do
-      sudo iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')
+    iptables -S FORWARD 2>/dev/null | grep '${container_ip}' | while read -r rule; do
+      iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')
     done
   " 2>/dev/null || true
+}
+
+# ── Global egress floor (port-level cage on incusbr0) ──────────────
+# Default-deny all container egress except DNS (53), HTTP (80), HTTPS (443, incl.
+# QUIC), and SSH (22 — needed for git-over-SSH). This is the port-level cage that
+# sits beneath the optional per-container domain filtering.
+#
+# Idempotent: skips if the DROP rule is already present. Applied by sandbox-setup
+# AND re-applied by every sandbox-start. That re-application is the reboot story:
+# a VM/host reboot clears the live iptables ruleset, but Incus containers do not
+# autostart here, so nothing reaches the network until the next sandbox-start —
+# which re-establishes this floor before the container is networked. Without this,
+# the cage would silently fail open after a reboot.
+ensure_global_egress_rules() {
+  local oiface
+  oiface=$(outbound_iface)
+  vm_run bash << EGRESS
+set -e
+if iptables -L FORWARD -n 2>/dev/null | grep -q "incusbr0.*DROP"; then
+  exit 0
+fi
+
+# Default deny outbound from containers
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -j DROP
+
+# Allow DNS (TCP + UDP)
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p udp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 53 -j ACCEPT
+
+# Allow HTTP
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 80 -j ACCEPT
+
+# Allow HTTPS (TCP + UDP for HTTP/3 QUIC)
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p udp --dport 443 -j ACCEPT
+
+# Allow SSH (git over SSH)
+iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 22 -j ACCEPT
+
+# Allow established/related return traffic
+iptables -I FORWARD -i '${oiface}' -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+EGRESS
 }
 
 # ── Source this library ─────────────────────────────────────────────
