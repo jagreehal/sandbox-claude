@@ -101,8 +101,10 @@ before anything is fetched, even in YOLO mode.
 
 Shadowing `npm` is normally a bad idea, but inside a throwaway cage it's the
 right call: it's not your host shell. Screening is **on by default**; bypass it
-for a single command with `SCREEN_OFF=1 npm install ...`. (`screen-node` is the
-filter; this cage is the boundary. They compose.)
+for a single command with `SCREEN_OFF=1 npm install ...`, or disable it for an
+entire sandbox at creation with `sandbox-start <name> --no-screen` (for a fully
+trusted project). (`screen-node` is the filter; this cage is the boundary. They
+compose.)
 
 The screening mechanism (shim → screen-node → real package manager, with the
 loop-preventing PATH strip) is validated independently of Incus by

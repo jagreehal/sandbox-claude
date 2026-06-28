@@ -65,6 +65,7 @@ print_connection_summary() {
   echo "  Claude:    sandbox ${name} --claude"
 }
 
+NO_SCREEN=""   # --no-screen: disable in-cage dependency screening for this container
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stack)            [[ -n "${2:-}" ]] || die "--stack requires a value"; STACK="$2"; shift 2 ;;
@@ -77,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --env)              [[ -n "${2:-}" ]] || die "--env requires a value"; EXTRA_ENVS+=("$2"); shift 2 ;;
     --restrict-domains) RESTRICT_DOMAINS="yes"; shift ;;
     --domains-file)     [[ -n "${2:-}" ]] || die "--domains-file requires a value"; RESTRICT_DOMAINS="yes"; DOMAINS_FILE="$2"; shift 2 ;;
+    --no-screen)        NO_SCREEN="yes"; shift ;;
     --*)                die "Unknown flag: $1" ;;
     *)
       if [[ -z "$NAME" ]]; then
@@ -90,6 +92,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --no-screen disables in-cage dependency screening: export SCREEN_OFF=1 so the
+# shims (which map npm->snpm) pass straight through to the real package manager.
+# Screening is on by default; this is the opt-out for a fully-trusted project.
+[[ "$NO_SCREEN" == "yes" ]] && EXTRA_ENVS+=("SCREEN_OFF=1")
 
 [[ -n "$NAME" ]] || die "Usage: sandbox-start <name> [repo-url] [flags]"
 
