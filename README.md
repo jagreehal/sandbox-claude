@@ -104,6 +104,11 @@ right call: it's not your host shell. Screening is **on by default**; bypass it
 for a single command with `SCREEN_OFF=1 npm install ...`. (`screen-node` is the
 filter; this cage is the boundary. They compose.)
 
+The screening mechanism (shim → screen-node → real package manager, with the
+loop-preventing PATH strip) is validated independently of Incus by
+[`tests/validate-screening.sh`](tests/validate-screening.sh), which runs the shim
+recipe against a plain Docker node container (self-skips without Docker).
+
 ## Table of Contents
 
 - [Architecture](#architecture)
