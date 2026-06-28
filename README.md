@@ -89,6 +89,21 @@ and [`bin/sandbox-publish`](bin/sandbox-publish) for the maintainer pipeline.
 > place and disabled by default. The Incus pull/import path is syntax-verified
 > and awaits one validation pass on a real Incus host before a release is cut.
 
+## Dependency screening inside the cage
+
+The cage keeps the agent off your host, but the agent's work leaves through its
+deploy key (`git push`). A dependency that runs a malicious install script could
+tamper with the source tree that then rides out. To close that gap, the **node**
+golden image bundles [screen-node](https://github.com/jagreehal/screen-node) and
+shadows the package managers, so the agent's plain `npm install` / `pnpm add` is
+**screened** (known-bad advisories, typosquats, the release-age worm window)
+before anything is fetched, even in YOLO mode.
+
+Shadowing `npm` is normally a bad idea, but inside a throwaway cage it's the
+right call: it's not your host shell. Screening is **on by default**; bypass it
+for a single command with `SCREEN_OFF=1 npm install ...`. (`screen-node` is the
+filter; this cage is the boundary. They compose.)
+
 ## Table of Contents
 
 - [Architecture](#architecture)
