@@ -88,7 +88,7 @@ done
 # ── Integrity manifest + authenticity signature ────────────────────
 info "Writing SHA256SUMS over ${#ASSETS[@]} image(s)..."
 (
-  cd "$WORKDIR"
+  cd "$WORKDIR" || exit 1
   if command -v sha256sum &>/dev/null; then sha256sum golden-*.tar.gz > SHA256SUMS
   else shasum -a 256 golden-*.tar.gz > SHA256SUMS; fi
 )

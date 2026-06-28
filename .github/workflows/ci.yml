@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # ubuntu-latest ships shellcheck. -x follows sourced files so lib/ is
+      # analysed in the context of each entry script (suppresses false-positive
+      # SC2034 on shared lib constants); --severity=warning ignores info/style.
+      - name: ShellCheck
+        run: shellcheck -x --severity=warning bin/* stacks/*.sh install.sh tests/validate-screening.sh
+
+  unit:
+    name: Unit tests (bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: Vendor bats helper libraries
+        run: |
+          git clone --depth 1 https://github.com/bats-core/bats-support tests/test_helper/bats-support
+          git clone --depth 1 https://github.com/bats-core/bats-assert tests/test_helper/bats-assert
+      - name: Unit tests
+        run: tests/run-tests.sh unit
+
+  screening:
+    name: In-cage screening (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Validates the composition with screen-node (shadowed npm is screened,
+      # no loop, SCREEN_OFF bypasses) against a real node container. No Incus
+      # needed; the Incus golden-image/container path is covered by the bats
+      # integration suite (which self-skips here, having no runtime).
+      - name: Validate screening shim
+        run: tests/validate-screening.sh
