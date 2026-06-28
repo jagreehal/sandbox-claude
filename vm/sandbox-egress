@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Sandbox global egress floor: default-deny container egress on incusbr0 except
+# DNS (53), HTTP (80), HTTPS (443, incl. QUIC), and SSH (22, for git-over-SSH).
+# This IS the port-level cage. It is the single source of truth for the rules.
+#
+# Installed into the sandbox VM (macOS) or the host (Linux) at /usr/local/sbin by
+# sandbox-setup / sandbox-start, and run on boot by sandbox-egress.service BEFORE
+# Incus networks restored containers, so the cage is never absent after a reboot.
+# Idempotent and standalone (no arguments, self-detects the outbound interface).
+set -e
+
+oiface="$(ip -4 route show default | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
+[ -n "$oiface" ] || { echo "sandbox-egress: no default route; cannot apply egress floor" >&2; exit 1; }
+
+# If the DROP floor is already present, do nothing. Checked with `iptables -C`
+# (an exact-rule match), NOT `iptables -L -n | grep`: `-L` without `-v` omits the
+# interface column, so a substring match would never fire and the floor would be
+# re-inserted on every run.
+iptables -C FORWARD -i incusbr0 -o "$oiface" -j DROP 2>/dev/null && exit 0
+
+# Default deny outbound from containers.
+iptables -I FORWARD -i incusbr0 -o "$oiface" -j DROP
+
+# Allow DNS (TCP + UDP).
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 53 -j ACCEPT
+
+# Allow HTTP.
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 80 -j ACCEPT
+
+# Allow HTTPS (TCP + UDP for HTTP/3 QUIC).
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 443 -j ACCEPT
+
+# Allow SSH (git over SSH).
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 22 -j ACCEPT
+
+# Allow established/related return traffic.
+iptables -I FORWARD -i "$oiface" -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
