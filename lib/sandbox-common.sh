@@ -601,40 +601,66 @@ cleanup_container_forward_rules() {
 # QUIC), and SSH (22 — needed for git-over-SSH). This is the port-level cage that
 # sits beneath the optional per-container domain filtering.
 #
-# Idempotent: skips if the DROP rule is already present. Applied by sandbox-setup
-# AND re-applied by every sandbox-start. That re-application is the reboot story:
-# a VM/host reboot clears the live iptables ruleset, but Incus containers do not
-# autostart here, so nothing reaches the network until the next sandbox-start —
-# which re-establishes this floor before the container is networked. Without this,
-# the cage would silently fail open after a reboot.
+# Reboot durability is the hard requirement here. A reboot clears the live
+# iptables ruleset, and Incus restores previously-running containers on boot
+# (boot.autostart empty = "restore last state"), so a container can be networked
+# again with NO floor present. Re-applying only on sandbox-start would leave that
+# window wide open (FORWARD policy is ACCEPT). So we install the floor as a
+# systemd unit ordered BEFORE incus starts instances, and also run it now. One
+# script is the single source of truth, invoked on boot and by every start.
+#
+# The floor script self-detects the outbound interface in the VM/host where it
+# runs (via the default route), so it stays correct without host-side plumbing.
 ensure_global_egress_rules() {
-  local oiface
-  oiface=$(outbound_iface)
-  vm_run bash << EGRESS
+  vm_run bash << 'EGRESS'
 set -e
-if iptables -L FORWARD -n 2>/dev/null | grep -q "incusbr0.*DROP"; then
-  exit 0
-fi
 
-# Default deny outbound from containers
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -j DROP
+# 1. Install the floor script — the single source of truth for the rules.
+#    Idempotent via `iptables -C` (note: `iptables -L -n` omits the interface
+#    column, so a substring match would never fire and would re-insert forever).
+cat > /usr/local/sbin/sandbox-egress << 'FLOOR'
+#!/usr/bin/env bash
+# Sandbox global egress floor: default-deny container egress on incusbr0 except
+# DNS/HTTP/HTTPS/SSH. Idempotent. Run on boot (sandbox-egress.service, before
+# Incus networks containers) and by every sandbox-start.
+set -e
+oiface="$(ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+[ -n "$oiface" ] || { echo "sandbox-egress: no default route; cannot apply egress floor" >&2; exit 1; }
+iptables -C FORWARD -i incusbr0 -o "$oiface" -j DROP 2>/dev/null && exit 0
+iptables -I FORWARD -i incusbr0 -o "$oiface" -j DROP
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 80 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p udp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o "$oiface" -p tcp --dport 22 -j ACCEPT
+iptables -I FORWARD -i "$oiface" -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+FLOOR
+chmod +x /usr/local/sbin/sandbox-egress
 
-# Allow DNS (TCP + UDP)
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p udp --dport 53 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 53 -j ACCEPT
+# 2. Install + enable the boot unit. Ordered before incus(-startup) so the floor
+#    is in place before any restored container is networked. Waits for a default
+#    route so the interface detection succeeds.
+cat > /etc/systemd/system/sandbox-egress.service << 'UNIT'
+[Unit]
+Description=Sandbox container egress floor (default-deny on incusbr0)
+Wants=network-online.target
+After=network-online.target
+Before=incus.service incus-startup.service
 
-# Allow HTTP
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 80 -j ACCEPT
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sandbox-egress
+RemainAfterExit=yes
 
-# Allow HTTPS (TCP + UDP for HTTP/3 QUIC)
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 443 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p udp --dport 443 -j ACCEPT
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable sandbox-egress.service >/dev/null 2>&1 || true
 
-# Allow SSH (git over SSH)
-iptables -I FORWARD -i incusbr0 -o '${oiface}' -p tcp --dport 22 -j ACCEPT
-
-# Allow established/related return traffic
-iptables -I FORWARD -i '${oiface}' -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+# 3. Apply the floor now (idempotent).
+/usr/local/sbin/sandbox-egress
 EGRESS
 }
 
