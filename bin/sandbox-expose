@@ -9,6 +9,18 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+USAGE="sandbox-expose <name> <port> [protocol] [--host-port <N>] — expose a container port
+
+Forwards a port bidirectionally (host→container inbound + container→external).
+The host port defaults to <port> + slot; override with --host-port.
+
+  protocol      tcp (default), udp, or both
+  --host-port   Pin a specific host port
+
+Example:
+  sandbox-expose proj 5432 --host-port 5435   # expose PostgreSQL"
+maybe_help "$USAGE" "$@"
+
 # ── Argument parsing ──────────────────────────────────────────────
 NAME=""
 PORT=""
@@ -46,7 +58,7 @@ done
 
 # Validate protocol
 case "$PROTO" in
-  tcp|udp|both) ;;
+  tcp | udp | both) ;;
   *) die "Protocol must be tcp, udp, or both — got: $PROTO" ;;
 esac
 
@@ -69,14 +81,14 @@ else
 fi
 
 # Validate host port range
-(( HOST_PORT >= 1 && HOST_PORT <= 65535 )) \
-  || die "Computed host port ${HOST_PORT} is out of range (1-65535)"
+((HOST_PORT >= 1 && HOST_PORT <= 65535)) ||
+  die "Computed host port ${HOST_PORT} is out of range (1-65535)"
 
 # Check for port conflicts
 proto_list=()
 case "$PROTO" in
-  tcp)  proto_list=(tcp) ;;
-  udp)  proto_list=(udp) ;;
+  tcp) proto_list=(tcp) ;;
+  udp) proto_list=(udp) ;;
   both) proto_list=(tcp udp) ;;
 esac
 

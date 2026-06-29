@@ -4,6 +4,13 @@
 TEST_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 load "${TEST_HELPER_DIR}/common.bash"
 
+# sandbox-start's "local mode" infers + clones the repo when run from a git
+# checkout. Integration tests run from PROJECT_ROOT (this checkout) but want
+# scratch containers, so run every test from a non-git scratch cwd. All paths
+# the tests use (PROJECT_ROOT, fixtures) are absolute, so cwd is otherwise
+# irrelevant. Tests that DO want a repo (config_*) cd into their own dir.
+cd "$(mktemp -d)" 2>/dev/null || true
+
 # Generate a unique test container name to avoid collisions
 # Uses BATS_TEST_FILENAME basename + PID for uniqueness
 _test_suite_name() {

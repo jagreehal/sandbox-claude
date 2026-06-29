@@ -3,6 +3,30 @@
 # Create a new agent container from a golden image, or restart a stopped one
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+source "${SCRIPT_DIR}/../lib/sandbox-config.sh"
+
+USAGE="sandbox-start <name> [repo-url] [flags] — create a container or restart a stopped one
+
+Run from inside a local checkout (no repo-url) to use ./sandbox.config.json and
+infer the repo + branch from git, or pass a repo URL explicitly. Flags override
+config; config overrides defaults.
+
+Flags:
+  --stack <name>        Golden image / toolchain (base node python go rust dotnet unison)
+  --branch <name>       Branch to check out
+  --from <name>         Fork from an existing container (inherits repo + stack)
+  --ssh-key <path>      Use a specific SSH key instead of an auto deploy key
+  --slot <1-99>         Pin the port slot (else auto-assigned)
+  --cpu <n>             CPU limit         --memory <size>   Memory limit (e.g. 8GiB)
+  --env KEY=VALUE       Forward an env var (repeatable)
+  --restrict-domains    Enable domain-based egress filtering
+  --domains-file <path> Use a specific allowlist file (implies --restrict-domains)
+  --no-screen           Disable in-cage dependency screening
+
+Examples:
+  cd ~/code/my-app && sandbox-start my-app          # local mode (reads sandbox.config.json)
+  sandbox-start proj git@github.com:me/repo.git --stack node --cpu 8"
+maybe_help "$USAGE" "$@"
 
 # ── Parse args ──────────────────────────────────────────────────────
 NAME=""
@@ -17,6 +41,13 @@ MEMORY=""
 EXTRA_ENVS=()
 RESTRICT_DOMAINS=""
 DOMAINS_FILE=""
+
+# Desired-state (resolved below, enforced by the apply_*_state reconcilers):
+#   ENV_MODE  allowlist | legacy        (config-governed env vs ~/.sandbox/env)
+#   SSH_MODE  custom_key | deploy_key | disabled | none
+ENV_MODE="legacy"
+SSH_MODE="none"
+KEY_PATH=""
 
 # ── Helpers ──────────────────────────────────────────────────────
 apply_domain_filtering() {
@@ -65,21 +96,216 @@ print_connection_summary() {
   echo "  Claude:    sandbox ${name} --claude"
 }
 
-NO_SCREEN=""   # --no-screen: disable in-cage dependency screening for this container
+# Apply per-repo `tools` version overrides (from sandbox.config.json) inside the
+# container via mise. The image already pre-warmed each stack's latest LTS, so
+# this is a no-op for the common case and only runs when a repo pins a version.
+apply_config_tools() {
+  local container="$1"
+  shift
+  local tools=("$@")
+  [[ ${#tools[@]} -gt 0 ]] || return 0
+  info "Applying tool versions from config: ${tools[*]}"
+  local t failed=()
+  for t in "${tools[@]}"; do
+    vm_run incus exec "${container}" --user "${SANDBOX_UID}" --group "${SANDBOX_GID}" \
+      --env HOME="${SANDBOX_USER_HOME}" -- bash -lc "mise use -g ${t}" ||
+      failed+=("$t")
+  done
+  # Fail closed: a tool the config declared but mise could not provide leaves the
+  # sandbox in an undeclared runtime state. Better to stop than to run silently
+  # on the wrong version.
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    die "Could not apply tool version(s) via mise: ${failed[*]}. The sandbox would run an undeclared runtime — fix the 'tools' entries (unknown tool or bad version?) and retry."
+  fi
+}
+
+# ── State reconcilers (shared by the create and restart paths) ──────
+# Both paths resolve the same desired-state model (ENV_MODE, SSH_MODE, …) and
+# then call these idempotent reconcilers, so a setting is enforced identically
+# however the container got here. Each takes the phase: create | restart.
+
+# Env: converge /etc/profile.d/sandbox-env.sh to the desired state.
+#   allowlist (config present)  -> exactly the resolved grants (empty clears them)
+#   legacy, previously config   -> clear stale grants, revert to ~/.sandbox/env
+#   legacy                      -> merge ~/.sandbox/env + --env (create always;
+#                                  restart only when --env was passed)
+apply_env_state() {
+  local phase="$1"
+  if [[ "$ENV_MODE" == "allowlist" ]]; then
+    info "Injecting environment variables (config allowlist)..."
+    inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+    set_metadata "$CONTAINER" "env-managed" "config"
+    return
+  fi
+  local prev=""
+  [[ "$phase" == "restart" ]] && prev="$(get_metadata "$CONTAINER" "env-managed")"
+  if [[ "$prev" == "config" ]]; then
+    info "Config removed since create — clearing previously-granted env, reverting to ~/.sandbox/env..."
+    clear_managed_env "$CONTAINER"
+    set_metadata "$CONTAINER" "env-managed" "legacy"
+    inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+  elif [[ "$phase" == "create" || ${#EXTRA_ENVS[@]} -gt 0 ]]; then
+    info "Injecting environment variables..."
+    inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+    set_metadata "$CONTAINER" "env-managed" "legacy"
+  fi
+}
+
+# SSH credentials: enforce the desired SSH_MODE inside the container.
+#   custom_key  user key (--ssh-key); restart replaces the existing one
+#   deploy_key  auto deploy key; create sets it up, restart resumes the agent
+#   disabled    grants.sshAgent=false; restart fully REVOKES (key/config/agent/GitHub)
+#   none        no repo / no key — nothing to do
+# (For deploy_key the key is created host-side BEFORE the container exists, in
+#  the create path, so a GitHub failure never leaves a container behind.)
+apply_ssh_state() {
+  local phase="$1"
+  case "$SSH_MODE" in
+    custom_key)
+      [[ "$phase" == "restart" ]] && {
+        info "Replacing SSH key..."
+        ssh_agent_cleanup "$CONTAINER"
+      }
+      info "Setting up SSH agent..."
+      ssh_agent_setup "$CONTAINER" "$KEY_PATH"
+      ;;
+    deploy_key)
+      if [[ "$phase" == "create" ]]; then
+        info "Setting up SSH agent..."
+        ssh_agent_setup "$CONTAINER" "$KEY_PATH"
+      else
+        info "Restarting SSH agent..."
+        ssh_agent_restart "$CONTAINER"
+      fi
+      ;;
+    disabled)
+      if [[ "$phase" == "restart" ]]; then
+        info "Revoking deploy-key access (grants.sshAgent=false)..."
+        revoke_deploy_key "$CONTAINER" "$NAME"
+      fi
+      ;;
+    none) : ;;
+  esac
+}
+
+# Egress: converge per-container domain filtering to the desired state.
+#   restricted  (flag / --domains-file / config egress.restrict:true)
+#               -> (re)apply the allowlist; idempotent (clears prior per-container
+#                  rules first so they never accumulate across restarts)
+#   open        (config present but restrict not requested)
+#               -> tear down any filtering on restart, so flipping restrict off
+#                  (or deleting the config) actually reverts to the open port-floor
+#   inherit     (no config, no flag) -> restart keeps whatever metadata recorded;
+#               create defaults open
+apply_egress_state() {
+  local phase="$1"
+  local mode
+  if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
+    mode="restricted"
+  elif [[ -n "$CONFIG_FILE" ]]; then
+    mode="open"
+  else
+    mode="inherit"
+  fi
+
+  if [[ "$mode" == "inherit" ]]; then
+    if [[ "$(get_metadata "$CONTAINER" "restrict-domains")" == "yes" ]]; then
+      mode="restricted"
+      [[ -z "$DOMAINS_FILE" ]] && DOMAINS_FILE="$(get_metadata "$CONTAINER" "domains-file")"
+    else
+      mode="open"
+    fi
+  fi
+
+  local ip
+  ip="$(get_container_ip "$CONTAINER")"
+
+  case "$mode" in
+    restricted)
+      # Idempotent: drop any prior per-container rules, then apply the current
+      # allowlist (DOMAINS_FILE is the baseline ∪ egress.allow effective file).
+      if [[ -n "$ip" ]]; then
+        remove_container_squid_redirect "$ip"
+        cleanup_container_forward_rules "$ip"
+      fi
+      apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE"
+      set_metadata "$CONTAINER" "restrict-domains" "yes"
+      [[ -n "$DOMAINS_FILE" ]] && set_metadata "$CONTAINER" "domains-file" "$DOMAINS_FILE"
+      ;;
+    open)
+      # Converge back to open if filtering was previously on (restrict flipped off
+      # or config removed). On a fresh create there is nothing to tear down.
+      if [[ "$(get_metadata "$CONTAINER" "restrict-domains")" == "yes" ]]; then
+        info "Removing domain filtering (egress now open)..."
+        cleanup_container_domain_filter "$CONTAINER"
+        if [[ -n "$ip" ]]; then
+          remove_container_squid_redirect "$ip"
+          cleanup_container_forward_rules "$ip"
+        fi
+        set_metadata "$CONTAINER" "restrict-domains" "no"
+      fi
+      ;;
+  esac
+}
+
+NO_SCREEN="" # --no-screen: disable in-cage dependency screening for this container
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stack)            [[ -n "${2:-}" ]] || die "--stack requires a value"; STACK="$2"; shift 2 ;;
-    --branch)           [[ -n "${2:-}" ]] || die "--branch requires a value"; BRANCH="$2"; shift 2 ;;
-    --from)             [[ -n "${2:-}" ]] || die "--from requires a value"; FROM="$2"; shift 2 ;;
-    --ssh-key)          [[ -n "${2:-}" ]] || die "--ssh-key requires a value"; SSH_KEY="$2"; shift 2 ;;
-    --slot)             [[ -n "${2:-}" ]] || die "--slot requires a value"; SLOT="$2"; shift 2 ;;
-    --cpu)              [[ -n "${2:-}" ]] || die "--cpu requires a value"; CPU="$2"; shift 2 ;;
-    --memory)           [[ -n "${2:-}" ]] || die "--memory requires a value"; MEMORY="$2"; shift 2 ;;
-    --env)              [[ -n "${2:-}" ]] || die "--env requires a value"; EXTRA_ENVS+=("$2"); shift 2 ;;
-    --restrict-domains) RESTRICT_DOMAINS="yes"; shift ;;
-    --domains-file)     [[ -n "${2:-}" ]] || die "--domains-file requires a value"; RESTRICT_DOMAINS="yes"; DOMAINS_FILE="$2"; shift 2 ;;
-    --no-screen)        NO_SCREEN="yes"; shift ;;
-    --*)                die "Unknown flag: $1" ;;
+    --stack)
+      [[ -n "${2:-}" ]] || die "--stack requires a value"
+      STACK="$2"
+      shift 2
+      ;;
+    --branch)
+      [[ -n "${2:-}" ]] || die "--branch requires a value"
+      BRANCH="$2"
+      shift 2
+      ;;
+    --from)
+      [[ -n "${2:-}" ]] || die "--from requires a value"
+      FROM="$2"
+      shift 2
+      ;;
+    --ssh-key)
+      [[ -n "${2:-}" ]] || die "--ssh-key requires a value"
+      SSH_KEY="$2"
+      shift 2
+      ;;
+    --slot)
+      [[ -n "${2:-}" ]] || die "--slot requires a value"
+      SLOT="$2"
+      shift 2
+      ;;
+    --cpu)
+      [[ -n "${2:-}" ]] || die "--cpu requires a value"
+      CPU="$2"
+      shift 2
+      ;;
+    --memory)
+      [[ -n "${2:-}" ]] || die "--memory requires a value"
+      MEMORY="$2"
+      shift 2
+      ;;
+    --env)
+      [[ -n "${2:-}" ]] || die "--env requires a value"
+      EXTRA_ENVS+=("$2")
+      shift 2
+      ;;
+    --restrict-domains)
+      RESTRICT_DOMAINS="yes"
+      shift
+      ;;
+    --domains-file)
+      [[ -n "${2:-}" ]] || die "--domains-file requires a value"
+      RESTRICT_DOMAINS="yes"
+      DOMAINS_FILE="$2"
+      shift 2
+      ;;
+    --no-screen)
+      NO_SCREEN="yes"
+      shift
+      ;;
+    --*) die "Unknown flag: $1" ;;
     *)
       if [[ -z "$NAME" ]]; then
         NAME="$1"
@@ -100,6 +326,69 @@ done
 
 [[ -n "$NAME" ]] || die "Usage: sandbox-start <name> [repo-url] [flags]"
 
+# ── Per-repo config (sandbox.config.json) ──────────────────────────
+# Local mode: when run from inside a checkout, read ./sandbox.config.json on the
+# HOST before touching the VM. Precedence is flag > config > schema default, so
+# config only fills values no flag set. STACK is resolved later (create path
+# only) so it never trips the restart immutability check. Tool versions are
+# collected here and applied inside the container after it exists.
+CONFIG_FILE="$(find_config_file "$PWD")"
+CONFIG_STACK=""
+CONFIG_TOOLS=()
+SSH_AGENT_ENABLED="yes" # config grants.sshAgent can turn the deploy-key agent off
+if [[ -n "$CONFIG_FILE" ]]; then
+  require_command jq
+  validate_config "$CONFIG_FILE"
+  info "Using config: ${CONFIG_FILE}"
+
+  CONFIG_STACK="$(config_scalar "$CONFIG_FILE" '.stack' 'base')"
+  [[ -z "$CPU" ]] && CPU="$(config_scalar "$CONFIG_FILE" '.resources.cpu' '')"
+  [[ -z "$MEMORY" ]] && MEMORY="$(config_scalar "$CONFIG_FILE" '.resources.memory' '')"
+
+  # screen: config `screen: false` => SCREEN_OFF=1 (a --no-screen flag also sets it).
+  if [[ "$NO_SCREEN" != "yes" && "$(config_bool "$CONFIG_FILE" '.screen' true)" == "false" ]]; then
+    EXTRA_ENVS+=("SCREEN_OFF=1")
+  fi
+
+  # grants.env is a real ALLOWLIST: with a config present, only listed names are
+  # forwarded, and ~/.sandbox/env is NOT bulk-injected (INJECT_ENV_SKIP_FILE=1) —
+  # an unlisted secret stays out of the container. Each name resolves to a value
+  # from ~/.sandbox/env first (the persistent store), else the host environment;
+  # the committed config never holds the value.
+  # shellcheck disable=SC2034  # read by inject_env() in lib/sandbox-common.sh
+  INJECT_ENV_SKIP_FILE=1
+  while IFS= read -r _name; do
+    [[ -z "$_name" ]] && continue
+    if _val="$(env_file_lookup "$SANDBOX_ENV_FILE" "$_name")"; then
+      EXTRA_ENVS+=("${_name}=${_val}")
+    elif [[ -n "${!_name:-}" ]]; then
+      EXTRA_ENVS+=("${_name}=${!_name}")
+    else
+      warn "config grants.env lists '${_name}', but it is set neither in ${SANDBOX_ENV_FILE} nor the host environment — skipping"
+    fi
+  done < <(config_array "$CONFIG_FILE" '.grants.env')
+
+  # grants.sshAgent: false => no deploy-key SSH agent (no git push-back / SSH
+  # clone). A --ssh-key flag still wins (explicit request for a key).
+  if [[ -z "$SSH_KEY" && "$(config_bool "$CONFIG_FILE" '.grants.sshAgent' true)" == "false" ]]; then
+    SSH_AGENT_ENABLED="no"
+    warn "config grants.sshAgent is false — no deploy key; git push-back and private-repo SSH clone are disabled."
+  fi
+
+  # egress.restrict: turn on domain filtering (allowlist built additively later).
+  if [[ -z "$RESTRICT_DOMAINS" && "$(config_bool "$CONFIG_FILE" '.egress.restrict' false)" == "true" ]]; then
+    RESTRICT_DOMAINS="yes"
+  fi
+
+  while IFS= read -r _entry; do
+    [[ -n "$_entry" ]] && CONFIG_TOOLS+=("$_entry")
+  done < <(config_tools "$CONFIG_FILE")
+fi
+
+# Env is config-governed (allowlist) whenever a config is present; otherwise the
+# legacy ~/.sandbox/env behaviour applies. Both paths reconcile from this.
+[[ -n "$CONFIG_FILE" ]] && ENV_MODE="allowlist"
+
 # ── Check for existing container (restart-or-create) ──────────────
 require_sandbox
 
@@ -110,6 +399,14 @@ require_sandbox
 ensure_global_egress_rules
 
 CONTAINER=$(container_name "$NAME")
+
+# When restricting egress with a config present (and no explicit --domains-file),
+# the effective allowlist is the bundled baseline UNION the repo's egress.allow.
+# Written to a stable per-container path so a later restart re-reads the same set.
+if [[ "$RESTRICT_DOMAINS" == "yes" && -z "$DOMAINS_FILE" && -n "$CONFIG_FILE" ]]; then
+  DOMAINS_FILE="$(build_effective_domains_file "$CONFIG_FILE" "$SANDBOX_DEFAULT_DOMAINS" \
+    "${HOME}/.sandbox/effective-domains/${CONTAINER}.txt")"
+fi
 
 CONTAINER_STATE=""
 if vm_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null; then
@@ -127,10 +424,10 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
   # Error on flags that can't be changed in-place
   IMMUTABLE_ERROR=""
   [[ "$STACK" != "base" ]] && IMMUTABLE_ERROR+="  --stack (cannot change stack on restart)\n"
-  [[ -n "$FROM" ]]         && IMMUTABLE_ERROR+="  --from (cannot change source on restart)\n"
-  [[ -n "$REPO" ]]         && IMMUTABLE_ERROR+="  --repo (cannot change repo on restart)\n"
-  [[ -n "$BRANCH" ]]       && IMMUTABLE_ERROR+="  --branch (cannot change branch on restart)\n"
-  [[ -n "$SLOT" ]]         && IMMUTABLE_ERROR+="  --slot (cannot change slot on restart)\n"
+  [[ -n "$FROM" ]] && IMMUTABLE_ERROR+="  --from (cannot change source on restart)\n"
+  [[ -n "$REPO" ]] && IMMUTABLE_ERROR+="  --repo (cannot change repo on restart)\n"
+  [[ -n "$BRANCH" ]] && IMMUTABLE_ERROR+="  --branch (cannot change branch on restart)\n"
+  [[ -n "$SLOT" ]] && IMMUTABLE_ERROR+="  --slot (cannot change slot on restart)\n"
   if [[ -n "$IMMUTABLE_ERROR" ]]; then
     die "Cannot change these flags on restart (destroy and recreate instead):\n${IMMUTABLE_ERROR}Use 'sandbox-stop ${NAME} --rm' first, then 'sandbox-start ${NAME} ...' to recreate."
   fi
@@ -154,44 +451,36 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
     vm_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
   fi
 
-  # Inject extra env vars (appends new ones to bashrc)
-  if [[ ${#EXTRA_ENVS[@]} -gt 0 ]]; then
-    info "Injecting environment variables..."
-    inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
-  fi
+  # Env + tools converge to the committed config (or revert if it was removed).
+  apply_env_state restart
+  apply_config_tools "$CONTAINER" ${CONFIG_TOOLS[@]+"${CONFIG_TOOLS[@]}"}
 
-  # Handle --ssh-key: replace deploy key in container and update SSH config
+  # Resolve desired SSH mode, then reconcile (replace key / revoke / resume agent).
   if [[ -n "$SSH_KEY" ]]; then
     [[ -f "$SSH_KEY" ]] || die "SSH key not found: ${SSH_KEY}"
-    info "Replacing SSH key..."
-    ssh_agent_cleanup "$CONTAINER"
-    ssh_agent_setup "$CONTAINER" "$SSH_KEY"
+    SSH_MODE="custom_key"
+    KEY_PATH="$SSH_KEY"
+  elif [[ "$SSH_AGENT_ENABLED" == "no" ]]; then
+    SSH_MODE="disabled"
   else
-    # Restart SSH agent using existing key on disk
-    info "Restarting SSH agent..."
-    ssh_agent_restart "$CONTAINER"
+    SSH_MODE="deploy_key"
   fi
+  apply_ssh_state restart
 
-  # Handle domain filtering updates
-  if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
-    info "Applying domain-based egress filtering..."
-    apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE"
-    set_metadata "$CONTAINER" "restrict-domains" "yes"
-    [[ -n "$DOMAINS_FILE" ]] && set_metadata "$CONTAINER" "domains-file" "$DOMAINS_FILE"
-  else
-    EXISTING_RESTRICT=$(get_metadata "$CONTAINER" "restrict-domains")
-    if [[ "$EXISTING_RESTRICT" == "yes" ]]; then
-      info "Re-applying domain filtering from saved configuration..."
-      EXISTING_DOMAINS_FILE=$(get_metadata "$CONTAINER" "domains-file")
-      apply_domain_filtering "$CONTAINER" "$EXISTING_DOMAINS_FILE"
-    fi
-  fi
+  # Egress converges to the desired state (apply / re-apply / tear down).
+  apply_egress_state restart
 
   print_connection_summary "$CONTAINER" "$NAME" "restarted"
   exit 0
 fi
 
 # ── Container doesn't exist: create from scratch ──────────────────
+
+# Per-repo config selects the stack (a --stack flag still wins; default base).
+if [[ "$STACK" == "base" && -n "$CONFIG_STACK" && "$CONFIG_STACK" != "base" ]]; then
+  STACK="$CONFIG_STACK"
+  info "Stack from config: ${STACK}"
+fi
 
 # ── Resolve --from ──────────────────────────────────────────────────
 if [[ -n "$FROM" ]]; then
@@ -236,6 +525,30 @@ if [[ -n "$FROM" ]]; then
   fi
 fi
 
+# Local mode: infer the repo URL + branch from the current checkout when none
+# was given (and not forking with --from). The sandbox still clones FRESH from
+# the remote (isolation + deploy-key push-back unchanged), so local
+# uncommitted/unpushed work is warned about rather than silently included.
+if [[ -z "$REPO" && -z "$FROM" ]] && git -C "$PWD" rev-parse --is-inside-work-tree &>/dev/null; then
+  REPO="$(git -C "$PWD" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$REPO" ]]; then
+    info "Local mode: inferred repo from origin → ${REPO}"
+    [[ -z "$BRANCH" ]] && BRANCH="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if ! git -C "$PWD" diff --quiet 2>/dev/null || ! git -C "$PWD" diff --cached --quiet 2>/dev/null; then
+      warn "Uncommitted changes won't be in the sandbox (it clones from the remote). Commit & push first."
+    fi
+    _ahead="$(git -C "$PWD" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
+    [[ "${_ahead:-0}" != "0" ]] && warn "Local branch is ${_ahead} commit(s) ahead of upstream — unpushed commits won't be in the sandbox."
+  fi
+fi
+
+# Fail fast on the sshAgent/SSH-remote trap: with no deploy key and no --ssh-key,
+# an SSH remote cannot be cloned. Catch it here with a precise message instead of
+# a generic clone failure later.
+if [[ "$SSH_AGENT_ENABLED" == "no" && -z "$SSH_KEY" && -n "$REPO" ]] && is_ssh_remote "$REPO"; then
+  die "grants.sshAgent is false but '${REPO}' is an SSH remote. Use an HTTPS remote, set grants.sshAgent: true, or pass --ssh-key."
+fi
+
 # ── Validate ────────────────────────────────────────────────────────
 require_golden "$STACK"
 
@@ -251,15 +564,22 @@ SSH_P=$(ssh_port "$SLOT")
 APP_P=$(app_port "$SLOT")
 ALT_P=$(alt_port "$SLOT")
 
-# ── Deploy key (auto-generate if repo provided and no --ssh-key) ───
-KEY_PATH=""
-if [[ -n "$REPO" && -z "$SSH_KEY" ]]; then
+# ── Resolve SSH mode + provision the deploy key ────────────────────
+# The deploy key is created host-side here, BEFORE the container exists, so a
+# GitHub failure never leaves a container behind. grants.sshAgent=false => no key.
+if [[ "$SSH_AGENT_ENABLED" == "no" ]]; then
+  SSH_MODE="disabled"
+elif [[ -n "$SSH_KEY" ]]; then
+  [[ -f "$SSH_KEY" ]] || die "SSH key not found: ${SSH_KEY}"
+  SSH_MODE="custom_key"
+  KEY_PATH="$SSH_KEY"
+elif [[ -n "$REPO" ]]; then
+  SSH_MODE="deploy_key"
   require_gh
   deploy_key_create "$NAME" "$REPO"
   KEY_PATH="${SANDBOX_KEY_DIR}/deploy_${NAME}"
-elif [[ -n "$SSH_KEY" ]]; then
-  [[ -f "$SSH_KEY" ]] || die "SSH key not found: ${SSH_KEY}"
-  KEY_PATH="$SSH_KEY"
+else
+  SSH_MODE="none"
 fi
 
 # ── Create container ────────────────────────────────────────────────
@@ -313,29 +633,19 @@ else
   warn "No SSH public key found (~/.ssh/id_*.pub) — SSH access requires manual key setup"
 fi
 
-# ── SSH agent ───────────────────────────────────────────────────────
-if [[ -n "$KEY_PATH" ]]; then
-  info "Setting up SSH agent..."
-  ssh_agent_setup "$CONTAINER" "$KEY_PATH"
-fi
-
-# ── Env vars ────────────────────────────────────────────────────────
-inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+# ── SSH agent, env, tools (same reconcilers the restart path uses) ──
+apply_ssh_state create
+apply_env_state create
+apply_config_tools "$CONTAINER" ${CONFIG_TOOLS[@]+"${CONFIG_TOOLS[@]}"}
 
 # ── Domain filtering ───────────────────────────────────────────────
-if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
-  info "Applying domain-based egress filtering..."
-  apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE"
-fi
+apply_egress_state create
 
 # ── Store metadata ──────────────────────────────────────────────────
+# (env-managed set by apply_env_state; restrict-domains/domains-file by apply_egress_state.)
 set_metadata "$CONTAINER" "slot" "$SLOT"
 set_metadata "$CONTAINER" "stack" "$STACK"
 [[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
-if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
-  set_metadata "$CONTAINER" "restrict-domains" "yes"
-  [[ -n "$DOMAINS_FILE" ]] && set_metadata "$CONTAINER" "domains-file" "$DOMAINS_FILE"
-fi
 
 # ── Clone repo ──────────────────────────────────────────────────────
 if [[ -n "$REPO" ]]; then
@@ -343,14 +653,14 @@ if [[ -n "$REPO" ]]; then
 
   # Configure safe.directory for ubuntu user and clone as ubuntu
   vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- \
-    bash -c "git config --global safe.directory '*' && SSH_AUTH_SOCK=/run/ssh-agent.sock git clone ${REPO} ${WORKSPACE_DIR}" \
-    || die "Git clone failed. Check SSH key and repo access."
+    bash -c "git config --global safe.directory '*' && SSH_AUTH_SOCK=/run/ssh-agent.sock git clone ${REPO} ${WORKSPACE_DIR}" ||
+    die "Git clone failed. Check SSH key and repo access."
 
   # Switch to requested branch (checkout if it exists remotely, create if it doesn't)
   if [[ -n "$BRANCH" ]]; then
     vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- \
-      bash -c "cd ${WORKSPACE_DIR} && git checkout ${BRANCH} 2>/dev/null || git checkout -b ${BRANCH}" \
-      || die "Failed to switch to branch '${BRANCH}'"
+      bash -c "cd ${WORKSPACE_DIR} && git checkout ${BRANCH} 2>/dev/null || git checkout -b ${BRANCH}" ||
+      die "Failed to switch to branch '${BRANCH}'"
     ok "Repository cloned (branch: ${BRANCH})"
   else
     ok "Repository cloned"

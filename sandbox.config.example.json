@@ -1,0 +1,22 @@
+{
+  "$schema": "./sandbox.schema.json",
+  "stack": "node",
+  "tools": {
+    "node": "lts"
+  },
+  "resources": {
+    "cpu": "4",
+    "memory": "8GiB"
+  },
+  "egress": {
+    "restrict": true,
+    "allow": [
+      "example.internal"
+    ]
+  },
+  "grants": {
+    "env": ["ANTHROPIC_API_KEY"],
+    "sshAgent": true
+  },
+  "screen": true
+}

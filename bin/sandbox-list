@@ -3,9 +3,17 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+USAGE="sandbox-list — list all agent containers with health status
+
+Usage:
+  sandbox-list
+
+Shows state, slot, forwarded ports, egress mode, and repo for every container."
+maybe_help "$USAGE" "$@"
+
 require_sandbox
 
-vm_run bash << 'INNERLIST'
+vm_run bash <<'INNERLIST'
 #!/usr/bin/env bash
 
 CONTAINERS=$(incus list -f csv -c n 2>/dev/null | grep "^agent-" || true)

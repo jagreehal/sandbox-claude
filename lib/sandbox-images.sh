@@ -41,8 +41,10 @@ SANDBOX_IMAGE_CACHE="${SANDBOX_IMAGE_CACHE:-${HOME}/.sandbox/images}"
 
 # ── Portable sha256 (macOS shasum / Linux sha256sum) ──────────────
 _sha256() {
-  if command -v sha256sum &>/dev/null; then sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum &>/dev/null; then shasum -a 256 "$1" | awk '{print $1}'
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256 "$1" | awk '{print $1}'
   else return 1; fi
 }
 
@@ -52,12 +54,18 @@ _sha256() {
 verify_image() {
   local cache="$1" file="$2"
   local sums="${cache}/SHA256SUMS"
-  [[ -f "$sums" ]] || { err "manifest SHA256SUMS missing — refusing image"; return 1; }
+  [[ -f "$sums" ]] || {
+    err "manifest SHA256SUMS missing — refusing image"
+    return 1
+  }
 
   # Authenticity: the manifest must be signed by our key (when verifiable).
   if command -v minisign &>/dev/null && [[ -f "$SANDBOX_IMAGE_PUBKEY" ]]; then
-    minisign -Vm "$sums" -p "$SANDBOX_IMAGE_PUBKEY" &>/dev/null \
-      || { err "minisign authenticity check FAILED for SHA256SUMS — refusing image"; return 1; }
+    minisign -Vm "$sums" -p "$SANDBOX_IMAGE_PUBKEY" &>/dev/null ||
+      {
+        err "minisign authenticity check FAILED for SHA256SUMS — refusing image"
+        return 1
+      }
   else
     warn "minisign or public key unavailable: authenticity NOT verified (integrity-only)."
   fi
@@ -65,9 +73,18 @@ verify_image() {
   # Integrity: the tarball must match the checksum recorded in the manifest.
   local want got
   want="$(awk -v f="$file" '$2==f {print $1}' "$sums")"
-  [[ -n "$want" ]] || { err "no checksum for ${file} in manifest — refusing image"; return 1; }
-  got="$(_sha256 "${cache}/${file}")" || { err "cannot compute sha256 — refusing image"; return 1; }
-  [[ "$want" == "$got" ]] || { err "checksum MISMATCH for ${file} — refusing image"; return 1; }
+  [[ -n "$want" ]] || {
+    err "no checksum for ${file} in manifest — refusing image"
+    return 1
+  }
+  got="$(_sha256 "${cache}/${file}")" || {
+    err "cannot compute sha256 — refusing image"
+    return 1
+  }
+  [[ "$want" == "$got" ]] || {
+    err "checksum MISMATCH for ${file} — refusing image"
+    return 1
+  }
   return 0
 }
 
@@ -75,7 +92,7 @@ verify_image() {
 vm_put_file() {
   local src="$1" dst="$2"
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    orb run -m "${SANDBOX_MACHINE}" tee "$dst" < "$src" >/dev/null
+    orb run -m "${SANDBOX_MACHINE}" tee "$dst" <"$src" >/dev/null
   else
     cp "$src" "$dst"
   fi
@@ -85,7 +102,7 @@ vm_put_file() {
 vm_get_file() {
   local src="$1" dst="$2"
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    orb run -m "${SANDBOX_MACHINE}" cat "$src" > "$dst"
+    orb run -m "${SANDBOX_MACHINE}" cat "$src" >"$dst"
   else
     cp "$src" "$dst"
   fi
@@ -125,21 +142,33 @@ pull_golden_image() {
   local stack="$1"
   local golden_name="golden-${stack}"
 
-  [[ -n "$SANDBOX_IMAGE_TAG" ]] || return 1            # pulling is opt-in
-  command -v gh &>/dev/null || { warn "gh missing: cannot pull ${golden_name}"; return 1; }
+  [[ -n "$SANDBOX_IMAGE_TAG" ]] || return 1 # pulling is opt-in
+  command -v gh &>/dev/null || {
+    warn "gh missing: cannot pull ${golden_name}"
+    return 1
+  }
 
   mkdir -p "$SANDBOX_IMAGE_CACHE"
   info "Pulling prebuilt ${golden_name} (${SANDBOX_IMAGE_REPO}@${SANDBOX_IMAGE_TAG})..."
   gh release download "$SANDBOX_IMAGE_TAG" -R "$SANDBOX_IMAGE_REPO" \
-      -p "SHA256SUMS" -p "SHA256SUMS.minisig" -p "${golden_name}.tar.gz" \
-      -D "$SANDBOX_IMAGE_CACHE" --clobber 2>/dev/null \
-    || { warn "download failed for ${golden_name} — will build locally"; return 1; }
+    -p "SHA256SUMS" -p "SHA256SUMS.minisig" -p "${golden_name}.tar.gz" \
+    -D "$SANDBOX_IMAGE_CACHE" --clobber 2>/dev/null ||
+    {
+      warn "download failed for ${golden_name} — will build locally"
+      return 1
+    }
 
-  verify_image "$SANDBOX_IMAGE_CACHE" "${golden_name}.tar.gz" \
-    || { warn "verification failed for ${golden_name} — will build locally"; return 1; }
+  verify_image "$SANDBOX_IMAGE_CACHE" "${golden_name}.tar.gz" ||
+    {
+      warn "verification failed for ${golden_name} — will build locally"
+      return 1
+    }
 
-  import_golden_tarball "${SANDBOX_IMAGE_CACHE}/${golden_name}.tar.gz" "$golden_name" \
-    || { warn "import failed for ${golden_name} — will build locally"; return 1; }
+  import_golden_tarball "${SANDBOX_IMAGE_CACHE}/${golden_name}.tar.gz" "$golden_name" ||
+    {
+      warn "import failed for ${golden_name} — will build locally"
+      return 1
+    }
 
   ok "${golden_name}/ready imported from verified prebuilt image"
 }

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jagreehal/sandbox-claude/sandbox.schema.json",
+  "title": "sandbox.config.json",
+  "description": "Per-repository sandbox configuration. Lives at the repo root; read on the host by sandbox-start (local mode). A partial override of the defaults below — omit any field to accept its default.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL to this schema, enabling editor autocomplete + validation."
+    },
+    "stack": {
+      "type": "string",
+      "description": "Which golden-<stack> image to launch (toolchain baked in). Equivalent to --stack.",
+      "enum": ["base", "node", "python", "go", "rust", "dotnet", "unison"],
+      "default": "base"
+    },
+    "tools": {
+      "type": "object",
+      "description": "mise-managed runtime version overrides, applied at sandbox-start. DEFAULT {} = use the image's pre-warmed latest-LTS (instant, no download). List a tool only to deviate, e.g. {\"node\": \"22\"}. Values are mise version specifiers: \"lts\", \"latest\", or an explicit version. Works for any tool with a mise core plugin (node, python, go, ...).",
+      "default": {},
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "resources": {
+      "type": "object",
+      "description": "Container resource limits. Equivalent to --cpu / --memory.",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "description": "CPU limit passed to incus (e.g. \"4\"). Integer count or Incus cpu range.",
+          "pattern": "^[0-9]+(-[0-9]+)?$"
+        },
+        "memory": {
+          "type": "string",
+          "description": "Memory limit passed to incus (e.g. \"8GiB\", \"2048MiB\").",
+          "pattern": "^[0-9]+([KMGT]i?B)?$"
+        }
+      }
+    },
+    "egress": {
+      "type": "object",
+      "description": "Domain-based egress filtering. additive to the bundled baseline allowlist (Anthropic + git hosts + package registries + mise/nodejs download hosts).",
+      "additionalProperties": false,
+      "default": {
+        "restrict": false,
+        "allow": []
+      },
+      "properties": {
+        "restrict": {
+          "type": "boolean",
+          "description": "Turn domain filtering on. Equivalent to --restrict-domains. When false, all HTTPS is open (the port-level egress floor still applies).",
+          "default": false
+        },
+        "allow": {
+          "type": "array",
+          "description": "Extra domains to splice through, ADDED to the bundled baseline. \".example.com\" matches all subdomains; \"exact.com\" matches only that host.",
+          "items": { "type": "string" },
+          "default": []
+        }
+      }
+    },
+    "grants": {
+      "type": "object",
+      "description": "What the sandbox is granted access to.",
+      "additionalProperties": false,
+      "default": {
+        "env": [],
+        "sshAgent": true
+      },
+      "properties": {
+        "env": {
+          "type": "array",
+          "description": "Names of environment variables to forward into the container. Values are NEVER stored here — they come from the host environment / ~/.sandbox/env. Equivalent to --env (names only).",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "default": []
+        },
+        "sshAgent": {
+          "type": "boolean",
+          "description": "Run the deploy-key SSH agent in the container (enables git push-back).",
+          "default": true
+        }
+      }
+    },
+    "screen": {
+      "type": "boolean",
+      "description": "In-cage dependency screening (shadowed npm/pnpm/yarn/npx via screen-node). Equivalent to the inverse of --no-screen.",
+      "default": true
+    }
+  }
+}

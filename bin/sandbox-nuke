@@ -4,11 +4,20 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+USAGE="sandbox-nuke — destroy EVERYTHING (nuclear option)
+
+Removes all agent containers, golden images, deploy keys, and (macOS) the
+OrbStack machine. Prompts for confirmation. There is no undo."
+maybe_help "$USAGE" "$@"
+
 require_sandbox
 
 echo "This will destroy ALL agent containers, golden images, and deploy keys."
 read -p "Are you sure? (yes/no): " CONFIRM
-[[ "$CONFIRM" == "yes" ]] || { echo "Aborted"; exit 0; }
+[[ "$CONFIRM" == "yes" ]] || {
+  echo "Aborted"
+  exit 0
+}
 
 # Ensure the OrbStack VM and local keys are always cleaned up, even if
 # container/golden-image cleanup fails midway (set -e from sandbox-common.sh
