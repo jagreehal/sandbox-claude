@@ -25,7 +25,7 @@ echo ""
 for script in "${SCRIPT_DIR}"/sandbox*; do
   name="$(basename "$script")"
   chmod +x "$script"
-  cat > "${DEST}/${name}" <<EOF
+  cat >"${DEST}/${name}" <<EOF
 #!/usr/bin/env bash
 exec "${script}" "\$@"
 EOF
@@ -49,9 +49,9 @@ if [[ ":$PATH:" != *":${DEST}:"* ]]; then
   if [[ -n "$SHELL_RC" ]]; then
     EXPORT_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
     if ! grep -qF '.local/bin' "$SHELL_RC" 2>/dev/null; then
-      echo "" >> "$SHELL_RC"
-      echo "# Added by sandbox-claude installer" >> "$SHELL_RC"
-      echo "$EXPORT_LINE" >> "$SHELL_RC"
+      echo "" >>"$SHELL_RC"
+      echo "# Added by sandbox-claude installer" >>"$SHELL_RC"
+      echo "$EXPORT_LINE" >>"$SHELL_RC"
       echo "Added ${DEST} to PATH in ${SHELL_RC}"
       echo "Run 'source ${SHELL_RC}' or open a new terminal to apply."
     else

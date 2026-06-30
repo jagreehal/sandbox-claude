@@ -9,15 +9,31 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 source "${SCRIPT_DIR}/../lib/sandbox-images.sh"
 
+USAGE="sandbox-setup [--rebuild <stack>] [--build] — one-time infrastructure setup
+
+Creates the VM (macOS) or installs directly (Linux), sets up Incus, applies the
+egress cage + Squid, and acquires golden images.
+
+Flags:
+  --rebuild <stack>  Rebuild one golden image (or \"all\"), ignoring the skip check
+  --build            Always build golden images locally; never pull prebuilt"
+maybe_help "$USAGE" "$@"
+
 STACKS_DIR="${SCRIPT_DIR}/../stacks"
 REBUILD_STACK=""
-FORCE_BUILD=0   # --build: always build golden images locally, never pull prebuilt
+FORCE_BUILD=0 # --build: always build golden images locally, never pull prebuilt
 
 # ── Parse args ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --rebuild) REBUILD_STACK="$2"; shift 2 ;;
-    --build)   FORCE_BUILD=1; shift ;;
+    --rebuild)
+      REBUILD_STACK="$2"
+      shift 2
+      ;;
+    --build)
+      FORCE_BUILD=1
+      shift
+      ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -50,7 +66,7 @@ fi
 # ── Step 2: Install Incus ──────────────────────────────────────────
 echo ""
 info "Step 2: Installing Incus..."
-vm_run bash << 'INCUS_SETUP'
+vm_run bash <<'INCUS_SETUP'
 set -e
 
 if command -v incus &>/dev/null; then
@@ -191,7 +207,7 @@ build_golden_local() {
   info "Running ${stack}.sh inside ${golden_name}..."
   vm_run bash -c "
     cat | incus exec ${golden_name} -- bash
-  " < "$stack_script"
+  " <"$stack_script"
 
   # Stop and snapshot
   vm_exec "incus stop ${golden_name}"

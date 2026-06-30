@@ -25,15 +25,21 @@ if [[ "${SCREEN_SHIM_INNER:-}" != "1" ]]; then
 fi
 
 # ── Inner side (running in the node container) ──────────────────────
-fail() { echo "FAIL: $*"; exit 1; }
+fail() {
+  echo "FAIL: $*"
+  exit 1
+}
 
 echo "## installing @jagreehal/screen-node"
-npm install -g @jagreehal/screen-node@latest >/tmp/install.log 2>&1 || { tail -20 /tmp/install.log; fail "screen-node install"; }
+npm install -g @jagreehal/screen-node@latest >/tmp/install.log 2>&1 || {
+  tail -20 /tmp/install.log
+  fail "screen-node install"
+}
 command -v snpm >/dev/null || fail "snpm not on PATH after install"
 
 # Shim recipe — KEEP IN SYNC with the block in stacks/node.sh.
 mkdir -p /opt/screen-shims
-cat > /opt/screen-shims/_screen-shim <<'SHIM'
+cat >/opt/screen-shims/_screen-shim <<'SHIM'
 #!/usr/bin/env bash
 self="$(basename "$0")"
 case "$self" in
@@ -51,22 +57,34 @@ for pm in npm pnpm yarn npx; do ln -sf _screen-shim "/opt/screen-shims/${pm}"; d
 export PATH="/opt/screen-shims:$PATH"
 [[ "$(command -v npm)" == "/opt/screen-shims/npm" ]] || fail "npm is not shadowed (got $(command -v npm))"
 
-mkdir -p /work && cd /work && echo '{"name":"t","version":"1.0.0"}' > package.json
+mkdir -p /work && cd /work && echo '{"name":"t","version":"1.0.0"}' >package.json
 
 echo "## TEST 1: shadowed 'npm install lodash' is screened + installs (no loop)"
-timeout 150 npm install lodash >t1.out 2>&1 || { tail -8 t1.out; fail "screened install exited non-zero (124 = loop/hang)"; }
-grep -qiE 'screen:|checked .* package|gates ran' t1.out || { tail -8 t1.out; fail "screening did not run"; }
+timeout 150 npm install lodash >t1.out 2>&1 || {
+  tail -8 t1.out
+  fail "screened install exited non-zero (124 = loop/hang)"
+}
+grep -qiE 'screen:|checked .* package|gates ran' t1.out || {
+  tail -8 t1.out
+  fail "screening did not run"
+}
 [[ -d node_modules/lodash ]] || fail "lodash not installed"
 echo "   PASS"
 
 echo "## TEST 2: SCREEN_OFF=1 bypasses screening, still installs"
 rm -rf node_modules
-SCREEN_OFF=1 timeout 150 npm install lodash >t2.out 2>&1 || { tail -8 t2.out; fail "SCREEN_OFF install exited non-zero"; }
+SCREEN_OFF=1 timeout 150 npm install lodash >t2.out 2>&1 || {
+  tail -8 t2.out
+  fail "SCREEN_OFF install exited non-zero"
+}
 [[ -d node_modules/lodash ]] || fail "SCREEN_OFF did not install"
 echo "   PASS"
 
 echo "## TEST 3: shadowed npx resolves without looping"
-timeout 60 npx --version >t3.out 2>&1 || { cat t3.out; fail "shadowed npx hung/failed"; }
+timeout 60 npx --version >t3.out 2>&1 || {
+  cat t3.out
+  fail "shadowed npx hung/failed"
+}
 echo "   PASS (npx $(tail -1 t3.out))"
 
 echo "ALL SCREENING CHECKS PASSED"

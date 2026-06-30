@@ -26,6 +26,21 @@ jobs:
       # SC2034 on shared lib constants); --severity=warning ignores info/style.
       - name: ShellCheck
         run: shellcheck -x --severity=warning bin/* stacks/*.sh vm/sandbox-egress install.sh tests/validate-screening.sh
+      - name: Install shfmt
+        run: sudo apt-get update && sudo apt-get install -y shfmt
+      - name: shfmt (formatting check)
+        run: make fmt-check
+
+  smoke:
+    name: CLI smoke (no VM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Exercises the paths that need no VM: every command's --help, schema +
+      # example validity, and config generation via sandbox-init. jq ships on
+      # ubuntu-latest.
+      - name: Smoke
+        run: make smoke
 
   unit:
     name: Unit tests (bats)
@@ -34,10 +49,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
-      - name: Vendor bats helper libraries
-        run: |
-          git clone --depth 1 https://github.com/bats-core/bats-support tests/test_helper/bats-support
-          git clone --depth 1 https://github.com/bats-core/bats-assert tests/test_helper/bats-assert
+      # run-tests.sh auto-clones the bats helper libraries on first run.
       - name: Unit tests
         run: tests/run-tests.sh unit
 

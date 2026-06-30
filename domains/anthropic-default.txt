@@ -217,6 +217,9 @@ download.eclipse.org
 # Node.js
 nodejs.org
 www.nodejs.org
+# mise (polyglot runtime version manager — installs/switches runtimes at start)
+mise.run
+mise.jdx.dev
 
 # ── Cloud Services & Monitoring ───────────────────────────────────
 statsig.com

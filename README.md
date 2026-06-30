@@ -121,6 +121,7 @@ recipe against a plain Docker node container (self-skips without Docker).
 - [Commands Reference](#commands-reference)
 - [Stacks](#stacks)
 - [Configuration](#configuration)
+  - [Project Config (`sandbox.config.json`)](#project-config-sandboxconfigjson)
   - [Environment Variables](#environment-variables)
   - [Domain-Based Egress Filtering](#domain-based-egress-filtering)
 - [Security Model](#security-model)
@@ -148,7 +149,7 @@ Golden images (shared across both platforms):
   +-- golden-base/ready     (Docker, Claude Code, SSH, git, Python 3)
   +-- golden-rust/ready     (base + Rust toolchain + quality tools)
   +-- golden-python/ready   (base + Poetry, uv, ruff, mypy, etc.)
-  +-- golden-node/ready     (base + Node.js 22, npm, pnpm, yarn, bun, eslint, etc.)
+  +-- golden-node/ready     (base + Node.js LTS via mise, npm, pnpm, yarn, bun, eslint, etc.)
   +-- golden-go/ready       (base + Go, golangci-lint, govulncheck)
   +-- golden-dotnet/ready   (base + .NET SDK, dotnet tools)
   +-- golden-unison/ready   (base + Unison UCM with built-in LSP + MCP)
@@ -238,6 +239,8 @@ Run `sudo sandbox-linux-prereqs` to install everything in this table automatical
 |---|---|
 | `sandbox-linux-prereqs` | Linux only: install system packages and configure group membership before `sandbox-setup` |
 | `sandbox-setup` | One-time: create VM (macOS) or install directly (Linux), set up Incus, build golden images, apply egress rules |
+| `sandbox-doctor` | Diagnose the environment (prerequisites, VM, egress cage, Squid, golden images, config) — read-only |
+| `sandbox-init` | Generate a `sandbox.config.json` for the current repo (auto-detects the stack) |
 | `sandbox-start` | Create a new container or restart a stopped one |
 | `sandbox` | Session entry point: shell, Claude, or arbitrary command |
 | `sandbox-list` | List all containers with health status |
@@ -549,7 +552,7 @@ Golden images are pre-built container snapshots with all tooling installed. Crea
 | **base** | `golden-base` | Docker CE + docker-compose-plugin, Claude Code (native binary), Python 3 + pip + venv, git, tmux, openssh-server, ripgrep, jq, htop, wget, unzip, build-essential, ca-certificates | -- |
 | **rust** | `golden-rust` | Everything in base + Rust stable toolchain via rustup | clippy (linting), rustfmt (formatting), cargo-tarpaulin (coverage), cargo-audit (security) |
 | **python** | `golden-python` | Everything in base + Poetry, uv | ruff (linting + formatting), mypy (type checking), bandit (security), coverage (code coverage) |
-| **node** | `golden-node` | Everything in base + Node.js 22 LTS, npm, pnpm, yarn, bun | c8 (V8-native coverage), eslint (linting), prettier (formatting) |
+| **node** | `golden-node` | Everything in base + Node.js latest LTS (via mise; override per-repo with `tools.node`), npm, pnpm, yarn, bun | c8 (V8-native coverage), eslint (linting), prettier (formatting) |
 | **go** | `golden-go` | Everything in base + Go latest stable | golangci-lint (meta-linter), govulncheck (security), `go tool cover` (built-in coverage) |
 | **dotnet** | `golden-dotnet` | Everything in base + .NET SDK (latest LTS) | dotnet-coverage (coverage), `dotnet format` (built-in formatting), dotnet-sonarscanner (quality analysis), security analyzers via NuGet |
 | **unison** | `golden-unison` | Everything in base + Unison Codebase Manager (UCM) via apt | Built-in LSP (port 5757: autocomplete, type errors, format on save, hover types), built-in MCP server (`ucm mcp`: code inspection, typechecking, Share search) |
@@ -600,6 +603,36 @@ sandbox-start my-elixir-app git@github.com:me/app.git --stack elixir
 ```
 
 ## Configuration
+
+### Project Config (`sandbox.config.json`)
+
+A repo can declare its sandbox as a committed, schema-validated file at its root, instead of a long string of `sandbox-start` flags. Run `sandbox-start <name>` from **inside a local checkout** ("local mode") and the file is read on the host before the container is created; the repo URL and branch are inferred from `git` (it still clones **fresh from the remote** — uncommitted/unpushed work is warned about, not included).
+
+Generate one with **`sandbox-init`**, which auto-detects the stack from build-tool markers (`package.json`→node, `pyproject.toml`→python, `go.mod`→go, `Cargo.toml`→rust, `*.csproj`→dotnet) and seeds the `ANTHROPIC_API_KEY` grant:
+
+```jsonc
+{
+  "$schema": "./sandbox.schema.json",   // editor autocomplete + validation
+  "stack": "node",                       // golden image (replaces --stack)
+  "tools": { "node": "lts" },            // mise version override; omit to use the image's pre-warmed latest LTS
+  "resources": { "cpu": "4", "memory": "8GiB" },
+  "egress": {                            // additive to the bundled baseline allowlist
+    "restrict": true,
+    "allow": ["example.internal"]
+  },
+  "grants": {
+    "env": ["ANTHROPIC_API_KEY"],        // names only — values come from ~/.sandbox/env / the host
+    "sshAgent": true
+  },
+  "screen": true                         // in-cage dependency screening
+}
+```
+
+- **Type-safety** is authoring-time via the `$schema` reference (see [`sandbox.schema.json`](sandbox.schema.json) and [`sandbox.config.example.json`](sandbox.config.example.json)). At runtime, `jq` (a host prerequisite when a config is present) reads it and the dangerous fields are validated; the editor handles the rest.
+- **Precedence** is `flag > sandbox.config.json > schema default`, so a one-off flag always wins and you never have to edit the committed file for a single run.
+- **Secrets never live in the file, and `grants.env` is a real allowlist.** It lists variable *names*; each resolves to a value from `~/.sandbox/env` (preferred) or the host environment. **When a config is present, only the listed names are forwarded** — `~/.sandbox/env` is *not* bulk-injected, so an unlisted secret stays out of the container. (Without a config, the legacy behaviour applies: all of `~/.sandbox/env` is injected.) Note this means a config must list `ANTHROPIC_API_KEY` for Claude Code to authenticate. The allowlist **converges on restart**: removing a name from `grants.env` — *or deleting `sandbox.config.json` entirely* — and restarting clears that variable from the container. A config-governed sandbox remembers it was managed, so even a full config deletion reverts cleanly to the legacy `~/.sandbox/env` behaviour without leaving old secrets behind.
+- **`grants.sshAgent`** (default `true`) controls the deploy-key SSH agent. Set it `false` and no deploy key is provisioned on create; on an **existing** sandbox, restarting with `false` fully **revokes** access — it stops the agent, removes the in-container key and SSH config, and deletes the GitHub deploy key. Git push-back and private-repo SSH clone are then disabled. An SSH remote with `sshAgent: false` and no `--ssh-key` is rejected up front (use an HTTPS remote, `sshAgent: true`, or `--ssh-key`).
+- **Versions** are managed by [`mise`](https://mise.jdx.dev), baked into every golden image with each stack's latest LTS pre-warmed (so default sandboxes start instantly). `tools` only requests a deviation, which mise resolves at start. Per-project versions also work via a repo's own native `.mise.toml` / `.tool-versions`.
 
 ### Environment Variables
 

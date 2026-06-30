@@ -12,13 +12,23 @@ if ! command -v bats &>/dev/null; then
   exit 1
 fi
 
-# Check helper libraries
-if [ ! -d "${SCRIPT_DIR}/test_helper/bats-support" ] || [ ! -d "${SCRIPT_DIR}/test_helper/bats-assert" ]; then
-  echo "Error: BATS helper libraries not found. Run:"
-  echo "  git clone --depth 1 https://github.com/bats-core/bats-support tests/test_helper/bats-support"
-  echo "  git clone --depth 1 https://github.com/bats-core/bats-assert tests/test_helper/bats-assert"
-  exit 1
-fi
+# Vendor the BATS helper libraries on first run (kept out of git; see .gitignore).
+# Auto-cloning keeps the contributor loop to a single command: tests/run-tests.sh.
+ensure_bats_helpers() {
+  local repo dir
+  for repo in bats-support bats-assert; do
+    dir="${SCRIPT_DIR}/test_helper/${repo}"
+    if [ ! -d "$dir" ]; then
+      echo "Fetching ${repo} (one-time)..."
+      git clone --depth 1 -q "https://github.com/bats-core/${repo}" "$dir" ||
+        {
+          echo "Error: could not clone ${repo}. Check network/git access." >&2
+          exit 1
+        }
+    fi
+  done
+}
+ensure_bats_helpers
 
 # ── Cleanup: stop and remove any test containers left behind ────────
 # Runs on EXIT (success, failure, or signal) to prevent leaked containers.

@@ -15,6 +15,7 @@ PROJECT_ROOT="$(cd "${TEST_HELPER_DIR}/../.." && pwd)"
 # not shell out to `ip route`.
 SCRIPT_DIR="${PROJECT_ROOT}/bin"
 source "${PROJECT_ROOT}/lib/sandbox-common.sh"
+source "${PROJECT_ROOT}/lib/sandbox-config.sh"
 
 # Create a temporary directory for test fixtures, cleaned up automatically
 setup() {

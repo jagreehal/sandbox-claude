@@ -26,6 +26,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 source "${SCRIPT_DIR}/../lib/sandbox-images.sh"
 
+USAGE="sandbox-publish --tag <release-tag> [flags] — (MAINTAINER) publish signed golden images
+
+Exports built golden images as verified, signed tarballs and uploads them to a
+GitHub Release so users can pull instead of building locally.
+
+Flags:
+  --tag <tag>       Release tag to publish under (required)
+  --key <path>      minisign secret key (default: ~/.sandbox/keys/minisign.key)
+  --stacks \"a b\"     Space-separated stacks to publish (default: all)
+  --repo owner/name Target repo (default: \$SANDBOX_IMAGE_REPO)
+
+Prereqs: golden images built (sandbox-setup --build), gh authenticated, minisign keypair."
+maybe_help "$USAGE" "$@"
+
 STACKS_DIR="${SCRIPT_DIR}/../stacks"
 TAG=""
 SIGN_KEY="${HOME}/.sandbox/keys/minisign.key"
@@ -35,10 +49,22 @@ REPO="${SANDBOX_IMAGE_REPO}"
 # ── Parse args ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tag)    TAG="$2"; shift 2 ;;
-    --key)    SIGN_KEY="$2"; shift 2 ;;
-    --stacks) STACKS="$2"; shift 2 ;;
-    --repo)   REPO="$2"; shift 2 ;;
+    --tag)
+      TAG="$2"
+      shift 2
+      ;;
+    --key)
+      SIGN_KEY="$2"
+      shift 2
+      ;;
+    --stacks)
+      STACKS="$2"
+      shift 2
+      ;;
+    --repo)
+      REPO="$2"
+      shift 2
+      ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -70,17 +96,27 @@ for stack in $STACKS; do
   fi
 
   info "Publishing ${golden_name}/ready -> unified image..."
-  vm_exec "incus publish ${golden_name}/ready --alias ${pub_alias} --reuse" \
-    || { warn "incus publish failed for ${golden_name} — skipping"; continue; }
+  vm_exec "incus publish ${golden_name}/ready --alias ${pub_alias} --reuse" ||
+    {
+      warn "incus publish failed for ${golden_name} — skipping"
+      continue
+    }
 
-  vm_exec "rm -f /tmp/${golden_name}.tar.gz; incus image export ${pub_alias} /tmp/${golden_name}" \
-    || { warn "incus image export failed for ${golden_name} — skipping"; vm_exec "incus image delete ${pub_alias} 2>/dev/null || true"; continue; }
+  vm_exec "rm -f /tmp/${golden_name}.tar.gz; incus image export ${pub_alias} /tmp/${golden_name}" ||
+    {
+      warn "incus image export failed for ${golden_name} — skipping"
+      vm_exec "incus image delete ${pub_alias} 2>/dev/null || true"
+      continue
+    }
 
-  vm_get_file "/tmp/${golden_name}.tar.gz" "$out" \
-    || { warn "could not retrieve ${golden_name}.tar.gz from VM — skipping"; }
+  vm_get_file "/tmp/${golden_name}.tar.gz" "$out" ||
+    { warn "could not retrieve ${golden_name}.tar.gz from VM — skipping"; }
   vm_exec "incus image delete ${pub_alias} 2>/dev/null || true; rm -f /tmp/${golden_name}.tar.gz"
 
-  [[ -s "$out" ]] && { ASSETS+=("$out"); ok "exported ${golden_name}.tar.gz"; }
+  [[ -s "$out" ]] && {
+    ASSETS+=("$out")
+    ok "exported ${golden_name}.tar.gz"
+  }
 done
 
 [[ ${#ASSETS[@]} -gt 0 ]] || die "No images exported — nothing to publish."
@@ -89,14 +125,15 @@ done
 info "Writing SHA256SUMS over ${#ASSETS[@]} image(s)..."
 (
   cd "$WORKDIR" || exit 1
-  if command -v sha256sum &>/dev/null; then sha256sum golden-*.tar.gz > SHA256SUMS
-  else shasum -a 256 golden-*.tar.gz > SHA256SUMS; fi
+  if command -v sha256sum &>/dev/null; then
+    sha256sum golden-*.tar.gz >SHA256SUMS
+  else shasum -a 256 golden-*.tar.gz >SHA256SUMS; fi
 )
 
 [[ -f "$SIGN_KEY" ]] || die "minisign secret key not found at ${SIGN_KEY} (generate one — see keys/README.md)"
 info "Signing SHA256SUMS with minisign..."
-minisign -Sm "${WORKDIR}/SHA256SUMS" -s "$SIGN_KEY" \
-  || die "minisign signing failed"
+minisign -Sm "${WORKDIR}/SHA256SUMS" -s "$SIGN_KEY" ||
+  die "minisign signing failed"
 
 # ── Upload to a GitHub Release ─────────────────────────────────────
 info "Uploading release ${TAG} to ${REPO}..."

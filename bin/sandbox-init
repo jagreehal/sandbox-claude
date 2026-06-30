@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# sandbox-init — generate a sandbox.config.json for the current repo.
+# Detects the stack from build-tool marker files, seeds a minimal config (only
+# non-default fields + the ANTHROPIC_API_KEY grant Claude Code needs to auth),
+# validates it, and writes it to ./sandbox.config.json.
+#   sandbox-init [--stack <name>] [--force]
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+source "${SCRIPT_DIR}/../lib/sandbox-config.sh"
+
+USAGE="sandbox-init [--stack <name>] [--force] — generate a sandbox.config.json
+
+Writes ./sandbox.config.json, auto-detecting the stack from build-tool markers
+(package.json, pyproject.toml, go.mod, Cargo.toml, *.csproj) and seeding the
+ANTHROPIC_API_KEY grant.
+
+Flags:
+  --stack <name>  Override stack detection (base node python go rust dotnet unison)
+  --force         Overwrite an existing sandbox.config.json"
+maybe_help "$USAGE" "$@"
+
+FORCE=0
+STACK=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stack)
+      [[ -n "${2:-}" ]] || die "--stack requires a value"
+      STACK="$2"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    *) die "Unknown argument: $1" ;;
+  esac
+done
+
+require_command jq
+
+TARGET="${PWD}/${SANDBOX_CONFIG_BASENAME}"
+if [[ -f "$TARGET" && "$FORCE" -ne 1 ]]; then
+  die "${TARGET} already exists. Use --force to overwrite."
+fi
+
+# Resolve the stack: explicit flag wins, else auto-detect from marker files.
+if [[ -n "$STACK" ]]; then
+  case " $SANDBOX_VALID_STACKS " in
+    *" $STACK "*) ;;
+    *) die "Unknown stack '${STACK}'. Valid: ${SANDBOX_VALID_STACKS}." ;;
+  esac
+  info "Using stack: ${STACK} (from --stack)"
+else
+  STACK="$(detect_stack "$PWD")"
+  if [[ "$STACK" == "base" ]]; then
+    info "No language markers found — defaulting to stack: base"
+  else
+    info "Detected stack: ${STACK}"
+  fi
+fi
+
+# Build a minimal config: $schema + (stack, unless base) + the API-key grant.
+# Everything else relies on schema defaults (partial-override style). Written to
+# a temp file and validated before moving into place, so a bad write never lands.
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+jq -n --arg schema "$SANDBOX_SCHEMA_URL" --arg stack "$STACK" '
+  {"$schema": $schema}
+  + (if $stack != "base" then {stack: $stack} else {} end)
+  + {grants: {env: ["ANTHROPIC_API_KEY"]}}
+' >"$TMP"
+
+validate_config "$TMP"
+mv "$TMP" "$TARGET"
+trap - EXIT
+
+ok "Wrote ${TARGET}"
+echo ""
+cat "$TARGET"
+echo ""
+info "Edit it to taste, then run 'sandbox-start <name>' from this directory."

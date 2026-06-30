@@ -7,6 +7,15 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+USAGE="sandbox-linux-prereqs — install Linux prerequisites for sandbox-setup
+
+Usage:
+  sudo sandbox-linux-prereqs
+
+Installs system packages and configures group membership. Linux only.
+Idempotent — safe to re-run."
+maybe_help "$USAGE" "$@"
+
 # ── Platform guard ────────────────────────────────────────────────
 if [[ "$SANDBOX_PLATFORM" != "linux" ]]; then
   die "This script is for Linux only (detected: ${SANDBOX_PLATFORM})"
@@ -50,9 +59,9 @@ install_if_missing() {
 }
 
 install_if_missing iptables iptables
-install_if_missing curl     curl
-install_if_missing gpg      gnupg
-install_if_missing git      git
+install_if_missing curl curl
+install_if_missing gpg gnupg
+install_if_missing git git
 
 # ── Step 3: Install GitHub CLI (gh) ───────────────────────────────
 echo ""
@@ -67,7 +76,7 @@ else
     -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
   chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    > /etc/apt/sources.list.d/github-cli.list
+    >/etc/apt/sources.list.d/github-cli.list
   apt-get update -qq
   apt-get install -y -qq gh
   PACKAGES_INSTALLED+=("gh")

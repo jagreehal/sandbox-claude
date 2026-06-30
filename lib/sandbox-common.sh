@@ -7,7 +7,9 @@ set -euo pipefail
 # ── Constants ───────────────────────────────────────────────────────
 SANDBOX_MACHINE="sandbox"
 SANDBOX_KEY_DIR="${HOME}/.sandbox/keys"
-SANDBOX_ENV_FILE="${HOME}/.sandbox/env"
+# Overridable so tests can point at a temp file instead of the user's real
+# secrets store; defaults to the canonical location.
+SANDBOX_ENV_FILE="${SANDBOX_ENV_FILE:-${HOME}/.sandbox/env}"
 WORKSPACE_DIR="/workspace/project"
 SANDBOX_UID=1000
 SANDBOX_GID=1000
@@ -20,8 +22,8 @@ SQUID_PORT=3129
 detect_platform() {
   case "$(uname -s)" in
     Darwin) SANDBOX_PLATFORM="macos" ;;
-    Linux)  SANDBOX_PLATFORM="linux" ;;
-    *)      die "Unsupported platform: $(uname -s)" ;;
+    Linux) SANDBOX_PLATFORM="linux" ;;
+    *) die "Unsupported platform: $(uname -s)" ;;
   esac
 }
 
@@ -45,25 +47,37 @@ _OUTBOUND_IFACE=""
 outbound_iface() {
   if [[ -z "$_OUTBOUND_IFACE" ]]; then
     _OUTBOUND_IFACE=$(detect_outbound_iface)
-    [[ -n "$_OUTBOUND_IFACE" ]] \
-      || die "Could not detect the outbound network interface (no default route?). See README Troubleshooting: 'Outbound Interface Not Detected'."
+    [[ -n "$_OUTBOUND_IFACE" ]] ||
+      die "Could not detect the outbound network interface (no default route?). See README Troubleshooting: 'Outbound Interface Not Detected'."
   fi
   printf '%s' "$_OUTBOUND_IFACE"
 }
 
 # ── Colour helpers (no-op if not a terminal) ────────────────────────
 if [[ -t 1 ]]; then
-  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
-  BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[0;33m'
+  BLUE='\033[0;34m'
+  BOLD='\033[1m'
+  NC='\033[0m'
 else
-  RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; NC=''
+  RED=''
+  GREEN=''
+  YELLOW=''
+  BLUE=''
+  BOLD=''
+  NC=''
 fi
 
-info()  { echo -e "${BLUE}${BOLD}[sandbox]${NC} $*"; }
-ok()    { echo -e "${GREEN}${BOLD}[sandbox]${NC} $*"; }
-warn()  { echo -e "${YELLOW}${BOLD}[sandbox]${NC} $*" >&2; }
-err()   { echo -e "${RED}${BOLD}[sandbox]${NC} $*" >&2; }
-die()   { err "$@"; exit 1; }
+info() { echo -e "${BLUE}${BOLD}[sandbox]${NC} $*"; }
+ok() { echo -e "${GREEN}${BOLD}[sandbox]${NC} $*"; }
+warn() { echo -e "${YELLOW}${BOLD}[sandbox]${NC} $*" >&2; }
+err() { echo -e "${RED}${BOLD}[sandbox]${NC} $*" >&2; }
+die() {
+  err "$@"
+  exit 1
+}
 
 # ── Prerequisite checks ────────────────────────────────────────────
 require_command() {
@@ -83,11 +97,11 @@ require_vm() {
 require_sandbox() {
   require_vm
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}" \
-      || die "Sandbox machine not found. Run 'sandbox-setup' first."
+    orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}" ||
+      die "Sandbox machine not found. Run 'sandbox-setup' first."
   else
-    incus profile show default &>/dev/null 2>&1 \
-      || die "Incus not initialized. Run 'sandbox-setup' first."
+    incus profile show default &>/dev/null 2>&1 ||
+      die "Incus not initialized. Run 'sandbox-setup' first."
   fi
 }
 
@@ -99,16 +113,16 @@ require_gh() {
 require_golden() {
   local stack="${1:-base}"
   local golden_name="golden-${stack}"
-  vm_exec "incus info ${golden_name} &>/dev/null" \
-    || die "Golden image '${golden_name}' not found. Run 'sandbox-setup' first."
-  vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" \
-    || die "Golden image '${golden_name}' has no 'ready' snapshot. Run 'sandbox-setup' first."
+  vm_exec "incus info ${golden_name} &>/dev/null" ||
+    die "Golden image '${golden_name}' not found. Run 'sandbox-setup' first."
+  vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" ||
+    die "Golden image '${golden_name}' has no 'ready' snapshot. Run 'sandbox-setup' first."
 }
 
 require_container() {
   local container="$1"
-  vm_exec "incus info ${container} &>/dev/null" 2>/dev/null \
-    || die "Container '${container}' not found"
+  vm_exec "incus info ${container} &>/dev/null" 2>/dev/null ||
+    die "Container '${container}' not found"
 }
 
 # ── VM execution abstraction ──────────────────────────────────────
@@ -147,7 +161,7 @@ wait_for_container_networking() {
   local attempts=0
   while ! vm_exec "incus exec ${container} -- ip addr show eth0 2>/dev/null | grep -q 'inet '" 2>/dev/null; do
     attempts=$((attempts + 1))
-    if (( attempts > 30 )); then
+    if ((attempts > 30)); then
       die "Timed out waiting for container networking"
     fi
     sleep 1
@@ -156,10 +170,10 @@ wait_for_container_networking() {
 
 # ── Slot management ────────────────────────────────────────────────
 # Port scheme: SSH = 2200+slot, App = 8000+slot, Alt = 9000+slot
-ssh_port()  { echo $(( 2200 + $1 )); }
-app_port()  { echo $(( 8000 + $1 )); }
-alt_port()  { echo $(( 9000 + $1 )); }
-exposed_host_port() { echo $(( $1 + $2 )); }
+ssh_port() { echo $((2200 + $1)); }
+app_port() { echo $((8000 + $1)); }
+alt_port() { echo $((9000 + $1)); }
+exposed_host_port() { echo $(($1 + $2)); }
 
 # Get the IPv4 address of a container. Returns empty string if not found.
 get_container_ip() {
@@ -212,7 +226,7 @@ next_free_slot() {
 
 validate_slot() {
   local slot="$1"
-  if [[ ! "$slot" =~ ^[0-9]+$ ]] || (( slot < 1 || slot > 99 )); then
+  if [[ ! "$slot" =~ ^[0-9]+$ ]] || ((slot < 1 || slot > 99)); then
     die "Slot must be a number between 1 and 99, got: $slot"
   fi
   local used
@@ -229,6 +243,13 @@ validate_slot() {
 parse_repo_nwo() {
   local url="$1"
   echo "$url" | sed -E 's#.*github\.com[:/]##; s#\.git$##'
+}
+
+# True if a git remote URL uses SSH transport (needs a key): scp-style git@host:
+# or an explicit ssh:// scheme. HTTPS remotes return false (no key required).
+is_ssh_remote() {
+  local url="$1"
+  [[ "$url" =~ ^git@ || "$url" =~ ^ssh:// ]]
 }
 
 deploy_key_create() {
@@ -249,8 +270,8 @@ deploy_key_create() {
   ssh-keygen -t ed25519 -f "$key_path" -C "sandbox-${name}" -N "" -q
 
   info "Registering deploy key on GitHub (${nwo})..."
-  gh repo deploy-key add "${key_path}.pub" -R "$nwo" -t "sandbox-${name}" -w \
-    || die "Failed to add deploy key to ${nwo}. Check repo admin access."
+  gh repo deploy-key add "${key_path}.pub" -R "$nwo" -t "sandbox-${name}" -w ||
+    die "Failed to add deploy key to ${nwo}. Check repo admin access."
 
   ok "Deploy key registered for ${nwo}"
 }
@@ -264,8 +285,8 @@ deploy_key_cleanup() {
 
   # Find and delete the deploy key from GitHub
   local key_id
-  key_id=$(gh repo deploy-key list -R "$nwo" 2>/dev/null \
-    | grep "sandbox-${name}" | awk '{print $1}' || true)
+  key_id=$(gh repo deploy-key list -R "$nwo" 2>/dev/null |
+    grep "sandbox-${name}" | awk '{print $1}' || true)
 
   if [[ -n "$key_id" ]]; then
     info "Removing deploy key from GitHub (${nwo})..."
@@ -279,12 +300,12 @@ deploy_key_cleanup() {
 # ── SSH agent management (per-container, inside OrbStack VM) ───────
 ssh_agent_setup() {
   local container="$1"
-  local key_path="$2"  # Host path to private key
+  local key_path="$2" # Host path to private key
 
   # Copy key into sandbox VM temporarily
   local vm_key="/tmp/sandbox-key-${container}"
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    orb run -m "${SANDBOX_MACHINE}" tee "$vm_key" < "$key_path" >/dev/null
+    orb run -m "${SANDBOX_MACHINE}" tee "$vm_key" <"$key_path" >/dev/null
   else
     cp "$key_path" "$vm_key"
   fi
@@ -346,21 +367,71 @@ ssh_agent_restart() {
   '"
 }
 
+# Fully revoke deploy-key access for an existing container (grants.sshAgent=false).
+# Stopping the agent is not enough: this also removes the in-container private key
+# and the tool-managed SSH config that points at it, and revokes the GitHub deploy
+# key (+ local copy) when the repo is known and gh is available. Best-effort, idempotent.
+revoke_deploy_key() {
+  local container="$1" name="$2"
+
+  ssh_agent_cleanup "$container"
+
+  # Remove the private key and the tool-owned SSH config from the container.
+  vm_exec "incus exec ${container} -- rm -f ${SANDBOX_USER_HOME}/.ssh/deploy-key ${SANDBOX_USER_HOME}/.ssh/config" 2>/dev/null || true
+
+  # Revoke the GitHub deploy key + local key pair (needs the repo URL + gh).
+  local repo
+  repo=$(get_metadata "$container" "repo")
+  if [[ -n "$repo" ]] && command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+    deploy_key_cleanup "$name" "$repo"
+  elif [[ -n "$repo" ]]; then
+    warn "Could not revoke the GitHub deploy key for ${repo} (gh unavailable/unauthenticated). The in-container key was removed; delete the key on GitHub manually."
+  fi
+}
+
 # ── Env forwarding ─────────────────────────────────────────────────
+# Look up a single key's value in an env file (KEY=VALUE or `export KEY=VALUE`,
+# comments/blank lines ignored). Echoes the value and returns 0 if found (last
+# definition wins, mirroring shell sourcing); returns 1 if absent. Used to
+# resolve config `grants.env` names to values WITHOUT injecting the whole file.
+env_file_lookup() {
+  local file="$1" key="$2" line body found=1 value=""
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# || -z "${line// /}" ]] && continue
+    body="${line#export }"
+    if [[ "${body%%=*}" == "$key" ]]; then
+      value="${body#*=}"
+      found=0
+    fi
+  done <"$file"
+  [[ "$found" -eq 0 ]] && printf '%s' "$value"
+  return "$found"
+}
+
 inject_env() {
   local container="$1"
   shift
   local extra_envs=("$@")
 
-  # Env lines to set this call: ~/.sandbox/env (the persistent base) plus any
-  # --env overrides, normalised below to `export KEY=VALUE`.
+  # Two modes:
+  #   Allowlist (INJECT_ENV_SKIP_FILE=1, a repo config governs env): the managed
+  #     file is tool-owned and CONVERGES to exactly the resolved grants. We do
+  #     not read ~/.sandbox/env, and we REPLACE the file wholesale — including
+  #     truncating it to empty when grants are removed, so a previously-injected
+  #     secret does not linger. This is what makes grants.env a real allowlist.
+  #   Legacy (no config): merge ~/.sandbox/env (the persistent base) with --env
+  #     overrides, dropping only the keys we set and keeping anything else.
+  local allowlist_mode=0
+  [[ "${INJECT_ENV_SKIP_FILE:-}" == "1" ]] && allowlist_mode=1
+
   local env_lines=()
-  if [[ -f "${SANDBOX_ENV_FILE}" ]]; then
+  if [[ "$allowlist_mode" -eq 0 && -f "${SANDBOX_ENV_FILE}" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
       # Skip comments (including indented) and empty lines
-      [[ "$line" =~ ^[[:space:]]*# || -z "${line// }" ]] && continue
+      [[ "$line" =~ ^[[:space:]]*# || -z "${line// /}" ]] && continue
       env_lines+=("$line")
-    done < "${SANDBOX_ENV_FILE}"
+    done <"${SANDBOX_ENV_FILE}"
   fi
   if [[ ${#extra_envs[@]} -gt 0 ]]; then
     for e in "${extra_envs[@]}"; do
@@ -368,37 +439,58 @@ inject_env() {
     done
   fi
 
-  [[ ${#env_lines[@]} -gt 0 ]] || return 0
+  # Legacy mode with nothing to set: leave the file untouched. Allowlist mode
+  # always proceeds — an empty grant set must still clear the file.
+  if [[ "$allowlist_mode" -eq 0 && ${#env_lines[@]} -eq 0 ]]; then
+    return 0
+  fi
 
-  # Build the export block and the list of keys it sets. We rewrite the managed
-  # file as (existing exports whose key we are NOT setting) + (this block), so
-  # repeated restarts never accumulate duplicate lines, while values set on an
-  # earlier run survive a bare restart.
+  # Build the export block (and, for legacy merge, the list of keys it sets).
   local tmpfile keys=()
   tmpfile=$(mktemp)
   local line body
-  for line in "${env_lines[@]}"; do
+  for line in "${env_lines[@]+"${env_lines[@]}"}"; do
     body="${line#export }"
     keys+=("${body%%=*}")
     if [[ "$line" == export\ * ]]; then
-      printf '%s\n' "$line" >> "$tmpfile"
+      printf '%s\n' "$line" >>"$tmpfile"
     else
-      printf 'export %s\n' "$line" >> "$tmpfile"
+      printf 'export %s\n' "$line" >>"$tmpfile"
     fi
   done
 
-  # Keys are env-var names ([A-Za-z_][A-Za-z0-9_]*), safe to splice into the ERE.
-  local drop_pattern
-  drop_pattern=$(IFS='|'; echo "${keys[*]}")
-  # Values arrive via stdin (the tmpfile), never interpolated into the command.
-  vm_run incus exec "${container}" -- bash -c "
-    f=/etc/profile.d/sandbox-env.sh
-    touch \"\$f\"
-    grep -vE '^export (${drop_pattern})=' \"\$f\" > \"\${f}.tmp\" || true
-    cat >> \"\${f}.tmp\"
-    mv \"\${f}.tmp\" \"\$f\"
-  " < "$tmpfile"
+  if [[ "$allowlist_mode" -eq 1 ]]; then
+    # Converge: managed file becomes EXACTLY this block (empty stdin => empty file).
+    vm_run incus exec "${container}" -- bash -c '
+      cat > /etc/profile.d/sandbox-env.sh
+    ' <"$tmpfile"
+  else
+    # Drop the keys we set, keep any others, append our block (no duplicates on
+    # repeated restarts; values set on an earlier run survive a bare restart).
+    # Keys are env-var names ([A-Za-z_][A-Za-z0-9_]*), safe to splice into the ERE.
+    local drop_pattern
+    drop_pattern=$(
+      IFS='|'
+      echo "${keys[*]}"
+    )
+    # Values arrive via stdin (the tmpfile), never interpolated into the command.
+    vm_run incus exec "${container}" -- bash -c "
+      f=/etc/profile.d/sandbox-env.sh
+      touch \"\$f\"
+      grep -vE '^export (${drop_pattern})=' \"\$f\" > \"\${f}.tmp\" || true
+      cat >> \"\${f}.tmp\"
+      mv \"\${f}.tmp\" \"\$f\"
+    " <"$tmpfile"
+  fi
   rm -f "$tmpfile"
+}
+
+# Truncate the tool-managed env file, dropping every previously-injected export.
+# Used when a sandbox was config-governed (allowlist) and the config is later
+# removed entirely — the old allowlisted secrets must not linger.
+clear_managed_env() {
+  local container="$1"
+  vm_run incus exec "${container}" -- bash -c ': > /etc/profile.d/sandbox-env.sh'
 }
 
 # ── Container metadata helpers ─────────────────────────────────────
@@ -438,7 +530,7 @@ parse_domains_file() {
 
 # Install squid-openssl in the VM if not present
 ensure_squid_installed() {
-  vm_run bash << 'SQUID_INSTALL'
+  vm_run bash <<'SQUID_INSTALL'
 set -e
 if command -v squid &>/dev/null; then
   echo "Squid already installed"
@@ -454,7 +546,7 @@ SQUID_INSTALL
 
 # Write base squid.conf with peek/splice SNI filtering config
 deploy_squid_config() {
-  vm_run bash << 'SQUID_CONF'
+  vm_run bash <<'SQUID_CONF'
 set -e
 
 CONF_DIR="/etc/squid/sandbox"
@@ -621,12 +713,19 @@ ensure_global_egress_rules() {
   local vm_dir="${SCRIPT_DIR}/../vm"
   # Push the floor script and boot unit into the VM/host (values via stdin, never
   # interpolated), then reload, enable, and apply.
-  vm_run bash -c 'cat > /usr/local/sbin/sandbox-egress && chmod 0755 /usr/local/sbin/sandbox-egress' < "${vm_dir}/sandbox-egress"
-  vm_run bash -c 'cat > /etc/systemd/system/sandbox-egress.service' < "${vm_dir}/sandbox-egress.service"
+  vm_run bash -c 'cat > /usr/local/sbin/sandbox-egress && chmod 0755 /usr/local/sbin/sandbox-egress' <"${vm_dir}/sandbox-egress"
+  vm_run bash -c 'cat > /etc/systemd/system/sandbox-egress.service' <"${vm_dir}/sandbox-egress.service"
   vm_run bash -c 'systemctl daemon-reload; systemctl enable sandbox-egress.service >/dev/null 2>&1 || true; /usr/local/sbin/sandbox-egress'
 }
+
+# ── Shared CLI conventions (maybe_help) ─────────────────────────────
+# Sourced from the sibling lib so every command gets `--help` handling without
+# its own source line. Resolved via BASH_SOURCE so it works regardless of cwd.
+# shellcheck source=lib/sandbox-cli.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sandbox-cli.sh"
 
 # ── Source this library ─────────────────────────────────────────────
 # Usage in bin/* scripts:
 #   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 #   source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+#   USAGE="..."; maybe_help "$@"   # gives the command -h/--help

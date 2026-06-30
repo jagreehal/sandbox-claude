@@ -4,14 +4,21 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+USAGE="sandbox-stop <name> [--rm] — stop a container
+
+  --rm   Also delete the container and clean up its deploy key
+
+The stopped container can be brought back with 'sandbox-start <name>'."
+maybe_help "$USAGE" "$@"
+
 # Accept `--rm` before or after the name (sandbox-stop --rm foo == sandbox-stop foo --rm).
 NAME=""
 REMOVE=""
 for arg in "$@"; do
   case "$arg" in
     --rm) REMOVE="--rm" ;;
-    -*)   die "Unknown flag: $arg" ;;
-    *)    if [[ -z "$NAME" ]]; then NAME="$arg"; else die "Unexpected argument: $arg"; fi ;;
+    -*) die "Unknown flag: $arg" ;;
+    *) if [[ -z "$NAME" ]]; then NAME="$arg"; else die "Unexpected argument: $arg"; fi ;;
   esac
 done
 [[ -n "$NAME" ]] || die "Usage: sandbox-stop <name> [--rm]"

@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# sandbox-doctor — Diagnose the sandbox environment end to end.
+# Aggregates the same checks the individual commands enforce (platform, VM,
+# prerequisites, egress floor, Squid, golden images, config tooling) into one
+# report, so setup/support problems are visible at a glance. Read-only: it
+# probes, never changes state.
+#
+# Exit status: 0 if nothing FAILed (warnings allowed), 1 if any check FAILed.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+USAGE="sandbox-doctor — diagnose the sandbox environment (read-only)
+
+Usage:
+  sandbox-doctor
+
+Checks host prerequisites, the VM/Incus, the egress cage, Squid, golden
+images, and local config/keys, then prints a PASS/WARN/FAIL summary.
+Exit status is non-zero if any check FAILED."
+maybe_help "$USAGE" "$@"
+
+# Diagnostics handle every failure explicitly and must report all checks, so
+# drop errexit (common.sh enables it); keep nounset + pipefail.
+set +e
+
+FAILS=0
+WARNS=0
+pass() { echo -e "  ${GREEN}✓${NC} $*"; }
+warn_c() {
+  echo -e "  ${YELLOW}!${NC} $*"
+  WARNS=$((WARNS + 1))
+}
+fail_c() {
+  echo -e "  ${RED}✗${NC} $*"
+  FAILS=$((FAILS + 1))
+}
+note() { echo -e "    ${*}"; }
+section() {
+  echo ""
+  echo -e "${BOLD}${1}${NC}"
+}
+
+have() { command -v "$1" &>/dev/null; }
+
+# ── Platform ────────────────────────────────────────────────────────
+section "Platform"
+pass "Detected: ${SANDBOX_PLATFORM}"
+
+# ── Host prerequisites ──────────────────────────────────────────────
+section "Host prerequisites"
+if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+  if have orb; then pass "orb (OrbStack) installed"; else fail_c "orb not found — install OrbStack"; fi
+else
+  if have incus; then pass "incus installed"; else fail_c "incus not found — run sandbox-setup"; fi
+fi
+
+if have git; then pass "git installed"; else fail_c "git not found"; fi
+if have ssh-keygen; then pass "ssh-keygen installed"; else fail_c "ssh-keygen not found"; fi
+
+if have jq; then
+  pass "jq installed (required for sandbox.config.json)"
+else
+  warn_c "jq not found — sandbox-start will fail when a sandbox.config.json is present"
+fi
+
+if have gh; then
+  if gh auth status &>/dev/null 2>&1; then
+    pass "gh installed and authenticated"
+  else
+    warn_c "gh installed but not authenticated — deploy-key automation needs 'gh auth login'"
+  fi
+else
+  warn_c "gh not found — needed only for automatic deploy keys"
+fi
+
+# ── VM / virtualisation reachable ──────────────────────────────────
+section "Virtualisation"
+VM_OK=0
+if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+  if have orb && orb list &>/dev/null; then
+    pass "OrbStack is running"
+    if orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}"; then
+      pass "Machine '${SANDBOX_MACHINE}' exists"
+      VM_OK=1
+    else
+      fail_c "Machine '${SANDBOX_MACHINE}' not found — run sandbox-setup"
+    fi
+  else
+    fail_c "OrbStack is not running — start it first"
+  fi
+else
+  if have incus && incus list &>/dev/null 2>&1; then
+    pass "incus is accessible"
+    VM_OK=1
+  else
+    fail_c "incus not accessible — check 'incus-admin' group membership / run sandbox-setup"
+  fi
+fi
+
+if ((VM_OK)); then
+  if vm_exec "incus profile show default" &>/dev/null 2>&1; then
+    pass "Incus 'default' profile initialised"
+  else
+    fail_c "Incus not initialised — run sandbox-setup"
+  fi
+fi
+
+# ── Networking / egress cage ───────────────────────────────────────
+section "Networking & egress cage"
+IFACE="$(detect_outbound_iface 2>/dev/null)"
+if [[ -n "$IFACE" ]]; then
+  pass "Outbound interface detected: ${IFACE}"
+else
+  fail_c "Could not detect outbound interface (no default route?) — see README Troubleshooting"
+fi
+
+if ((VM_OK)); then
+  if vm_exec "test -x /usr/local/sbin/sandbox-egress" 2>/dev/null; then
+    pass "Egress floor script installed (/usr/local/sbin/sandbox-egress)"
+  else
+    fail_c "Egress floor script missing — run sandbox-start (reinstalls it) or sandbox-setup"
+  fi
+  if vm_exec "systemctl is-enabled sandbox-egress.service" &>/dev/null 2>&1; then
+    pass "Egress floor boot unit enabled (survives reboot)"
+  else
+    warn_c "sandbox-egress.service not enabled — the cage may not re-apply on reboot"
+  fi
+  if vm_exec "iptables -S FORWARD 2>/dev/null | grep -q DROP" 2>/dev/null; then
+    pass "Egress floor active in FORWARD chain"
+  else
+    warn_c "No DROP rule in FORWARD — egress floor may not be applied right now"
+  fi
+  if vm_exec "command -v squid" &>/dev/null 2>&1; then
+    pass "Squid installed (domain filtering available)"
+    if vm_exec "systemctl is-active squid" &>/dev/null 2>&1; then
+      pass "Squid is running"
+    else
+      warn_c "Squid installed but not running (only needed when restricting domains)"
+    fi
+  else
+    warn_c "Squid not installed — --restrict-domains / egress.restrict won't work"
+  fi
+fi
+
+# ── Golden images ──────────────────────────────────────────────────
+section "Golden images"
+if ((VM_OK)); then
+  FOUND=0
+  for stack_file in "${SCRIPT_DIR}/../stacks"/*.sh; do
+    stack="$(basename "$stack_file" .sh)"
+    if vm_exec "incus snapshot list golden-${stack} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
+      pass "golden-${stack}/ready present"
+      FOUND=$((FOUND + 1))
+    else
+      note "${YELLOW}–${NC} golden-${stack}: not built (build on demand with sandbox-setup --rebuild ${stack})"
+    fi
+  done
+  if ((FOUND == 0)); then
+    fail_c "No golden images built — run sandbox-setup"
+  fi
+  if vm_exec "incus snapshot list golden-base -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
+    if vm_exec "incus exec golden-base -- test -x /usr/local/bin/mise" 2>/dev/null; then
+      pass "mise present in golden-base"
+    else
+      # golden-base is stopped between builds; this probe needs it running, so
+      # absence here is inconclusive rather than a hard failure.
+      note "${YELLOW}–${NC} could not confirm mise in golden-base (image stopped) — rebuild if versions misbehave"
+    fi
+  fi
+else
+  note "(skipped — VM not reachable)"
+fi
+
+# ── Local config & keys ────────────────────────────────────────────
+section "Local config & keys"
+if [[ -f "$SANDBOX_ENV_FILE" ]]; then
+  perms="$(stat -f '%Lp' "$SANDBOX_ENV_FILE" 2>/dev/null || stat -c '%a' "$SANDBOX_ENV_FILE" 2>/dev/null)"
+  if [[ -n "$perms" && "${perms: -2}" != "00" ]]; then
+    warn_c "${SANDBOX_ENV_FILE} is group/world-readable (${perms}) — it holds secrets; chmod 600 it"
+  else
+    pass "${SANDBOX_ENV_FILE} present (perms ${perms:-unknown})"
+  fi
+else
+  note "${YELLOW}–${NC} ${SANDBOX_ENV_FILE} not present (optional — holds forwarded secrets)"
+fi
+
+HOST_KEY=""
+for keyfile in ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub ~/.ssh/id_ecdsa.pub; do
+  [[ -f "$keyfile" ]] && {
+    HOST_KEY="$keyfile"
+    break
+  }
+done
+if [[ -n "$HOST_KEY" ]]; then
+  pass "Host SSH public key found ($(basename "$HOST_KEY")) — enables ssh/VS Code access"
+else
+  warn_c "No ~/.ssh/id_*.pub — SSH/VS Code access to containers needs a host key"
+fi
+
+if [[ -f "${PWD}/sandbox.config.json" ]]; then
+  if have jq && jq -e . "${PWD}/sandbox.config.json" &>/dev/null; then
+    pass "sandbox.config.json in current directory is valid JSON"
+  else
+    fail_c "sandbox.config.json in current directory is not valid JSON"
+  fi
+fi
+
+# ── Summary ─────────────────────────────────────────────────────────
+section "Summary"
+if ((FAILS == 0 && WARNS == 0)); then
+  ok "All checks passed."
+elif ((FAILS == 0)); then
+  warn "${WARNS} warning(s), no failures — sandbox should work."
+else
+  err "${FAILS} failure(s), ${WARNS} warning(s) — fix the failures above."
+fi
+
+exit $((FAILS > 0 ? 1 : 0))

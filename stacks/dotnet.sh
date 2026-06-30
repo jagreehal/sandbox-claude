@@ -21,7 +21,7 @@ su - ubuntu -c 'dotnet tool install --global dotnet-coverage'
 su - ubuntu -c 'dotnet tool install --global dotnet-sonarscanner'
 
 # Add dotnet tools to PATH
-echo 'export PATH=$PATH:$HOME/.dotnet/tools' >> /home/ubuntu/.bashrc
+echo 'export PATH=$PATH:$HOME/.dotnet/tools' >>/home/ubuntu/.bashrc
 
 # Formatting: built-in via `dotnet format`, no install needed
 # Security analyzers: installed per-project via NuGet
