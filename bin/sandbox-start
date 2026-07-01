@@ -94,6 +94,7 @@ print_connection_summary() {
   echo ""
   echo "  Shell:     sandbox ${name}"
   echo "  Claude:    sandbox ${name} --claude"
+  echo "  Codex:     sandbox ${name} --codex"
 }
 
 # Apply per-repo `tools` version overrides (from sandbox.config.json) inside the
@@ -117,6 +118,21 @@ apply_config_tools() {
   if [[ ${#failed[@]} -gt 0 ]]; then
     die "Could not apply tool version(s) via mise: ${failed[*]}. The sandbox would run an undeclared runtime — fix the 'tools' entries (unknown tool or bad version?) and retry."
   fi
+}
+
+# grants.codexLogin: true forwards container port 1455 (Codex's OAuth callback
+# port) to the same host port, so `codex` can complete browser login from
+# inside the cage. Idempotent — skips if the proxy device already exists
+# (converges the same way on every create/restart, needs the container's
+# "slot" metadata already set).
+apply_codex_login_grant() {
+  local name="$1" container="$2"
+  [[ "$CODEX_LOGIN_ENABLED" == "yes" ]] || return 0
+  if vm_exec "incus config device list '${container}' 2>/dev/null | grep -qx 'port-1455-tcp'"; then
+    return 0
+  fi
+  info "Forwarding port 1455 for Codex login (grants.codexLogin)..."
+  "${SCRIPT_DIR}/sandbox-expose" "$name" 1455 --host-port 1455
 }
 
 # ── State reconcilers (shared by the create and restart paths) ──────
@@ -336,6 +352,7 @@ CONFIG_FILE="$(find_config_file "$PWD")"
 CONFIG_STACK=""
 CONFIG_TOOLS=()
 SSH_AGENT_ENABLED="yes" # config grants.sshAgent can turn the deploy-key agent off
+CODEX_LOGIN_ENABLED="no" # config grants.codexLogin=true forwards Codex's OAuth callback port
 if [[ -n "$CONFIG_FILE" ]]; then
   require_command jq
   validate_config "$CONFIG_FILE"
@@ -373,6 +390,12 @@ if [[ -n "$CONFIG_FILE" ]]; then
   if [[ -z "$SSH_KEY" && "$(config_bool "$CONFIG_FILE" '.grants.sshAgent' true)" == "false" ]]; then
     SSH_AGENT_ENABLED="no"
     warn "config grants.sshAgent is false — no deploy key; git push-back and private-repo SSH clone are disabled."
+  fi
+
+  # grants.codexLogin: true => forward Codex's OAuth callback port (1455) so
+  # `sandbox <name> --codex` can complete a real browser login from the cage.
+  if [[ "$(config_bool "$CONFIG_FILE" '.grants.codexLogin' false)" == "true" ]]; then
+    CODEX_LOGIN_ENABLED="yes"
   fi
 
   # egress.restrict: turn on domain filtering (allowlist built additively later).
@@ -469,6 +492,8 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
 
   # Egress converges to the desired state (apply / re-apply / tear down).
   apply_egress_state restart
+
+  apply_codex_login_grant "$NAME" "$CONTAINER"
 
   print_connection_summary "$CONTAINER" "$NAME" "restarted"
   exit 0
@@ -646,6 +671,8 @@ apply_egress_state create
 set_metadata "$CONTAINER" "slot" "$SLOT"
 set_metadata "$CONTAINER" "stack" "$STACK"
 [[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
+
+apply_codex_login_grant "$NAME" "$CONTAINER"
 
 # ── Clone repo ──────────────────────────────────────────────────────
 if [[ -n "$REPO" ]]; then

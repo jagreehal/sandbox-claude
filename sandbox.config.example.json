@@ -16,7 +16,8 @@
   },
   "grants": {
     "env": ["ANTHROPIC_API_KEY"],
-    "sshAgent": true
+    "sshAgent": true,
+    "codexLogin": false
   },
   "screen": true
 }

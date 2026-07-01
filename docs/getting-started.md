@@ -96,6 +96,14 @@ sandbox my-project --claude
 
 This launches `claude --dangerously-skip-permissions` inside the container. YOLO mode is the point: because the agent is caged, it can edit, run, and install freely without being able to reach your host. The first launch walks you through authentication; the token is stored inside the container and survives restarts.
 
+## Step 5b: Run Codex instead (or as well)
+
+```bash
+sandbox my-project --codex
+```
+
+This launches `codex --dangerously-bypass-approvals-and-sandbox` — Codex's own equivalent of YOLO mode, safe here because the Incus cage is already the real sandbox boundary. The first launch prompts you to sign in with ChatGPT: Codex opens a browser OAuth flow that calls back to `http://localhost:1455`, which only reaches your browser if that port is forwarded from the container. Set `grants.codexLogin: true` in `sandbox.config.json` (see [Configuration](../README.md#configuration)) before first login so `sandbox-start` forwards it automatically; the credential is then stored inside the container and survives restarts, same as Claude's.
+
 ## Step 6: See what is running
 
 ```bash
