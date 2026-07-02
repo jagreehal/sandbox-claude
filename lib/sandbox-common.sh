@@ -200,6 +200,27 @@ check_port_conflict() {
   " 2>/dev/null || true
 }
 
+# Pure decision for the grants.codexLogin reconciler: given the desired state
+# and the current forward's presence/conflict, echo the action to take. Kept
+# separate from the I/O in sandbox-start so the branch table is unit-testable.
+# Usage: codex_login_action <enabled: yes|no> <present: yes|no> <conflict: name-or-empty>
+#   enabled + present            -> noop   (already forwarded)
+#   enabled + absent + conflict  -> skip   (another sandbox owns the port)
+#   enabled + absent + no clash  -> add
+#   disabled + present           -> remove (converge back off)
+#   disabled + absent            -> noop
+codex_login_action() {
+  local enabled="$1" present="$2" conflict="$3"
+  if [[ "$enabled" == "yes" ]]; then
+    [[ "$present" == "yes" ]] && { echo noop; return; }
+    [[ -n "$conflict" ]] && { echo skip; return; }
+    echo add
+  else
+    [[ "$present" == "no" ]] && { echo noop; return; }
+    echo remove
+  fi
+}
+
 # Returns list of currently used slots by querying ssh-proxy listen ports
 used_slots() {
   vm_exec '

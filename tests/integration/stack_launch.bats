@@ -75,3 +75,16 @@ setup() {
     assert_output "$stack"
   done < "$(_stacks_file)"
 }
+
+# Regression guard for the "older golden image lacks codex" upgrade gap: every
+# fresh container (all stacks clone from base) must ship the Codex CLI on PATH.
+# If this fails, the golden images predate the codex install in stacks/base.sh
+# and need `sandbox-setup --rebuild all`.
+@test "all stack containers have codex on PATH" {
+  local prefix
+  prefix=$(_prefix)
+  while IFS= read -r stack; do
+    run vm_run incus exec "agent-${prefix}-${stack}" -- command -v codex
+    assert_success
+  done < "$(_stacks_file)"
+}

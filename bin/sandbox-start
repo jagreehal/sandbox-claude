@@ -129,27 +129,31 @@ CODEX_LOGIN_PORT=1455
 apply_codex_login_grant() {
   local name="$1" container="$2"
   local dev="port-${CODEX_LOGIN_PORT}-tcp"
-  local present="no"
+  local present="no" conflict=""
   vm_exec "incus config device list '${container}' 2>/dev/null | grep -qx '${dev}'" && present="yes"
-
-  if [[ "$CODEX_LOGIN_ENABLED" == "yes" ]]; then
-    [[ "$present" == "yes" ]] && return 0
-    local conflict
+  # Only probe for a conflict when we might actually add — check_port_conflict
+  # shells out, so skip it on the noop/remove paths.
+  if [[ "$CODEX_LOGIN_ENABLED" == "yes" && "$present" == "no" ]]; then
     conflict="$(check_port_conflict "$CODEX_LOGIN_PORT" tcp "$container")"
-    if [[ -n "$conflict" ]]; then
-      warn "grants.codexLogin: host port ${CODEX_LOGIN_PORT} is already forwarded by '${conflict}'. Codex login for '${container}' is disabled until that sandbox frees it (set its codexLogin false and restart). This sandbox otherwise started normally."
-      return 0
-    fi
-    info "Forwarding port ${CODEX_LOGIN_PORT} for Codex login (grants.codexLogin)..."
-    "${SCRIPT_DIR}/sandbox-expose" "$name" "$CODEX_LOGIN_PORT" --host-port "$CODEX_LOGIN_PORT"
-  else
-    [[ "$present" == "no" ]] && return 0
-    info "Removing Codex login port forward (grants.codexLogin off)..."
-    vm_exec "incus config device remove '${container}' '${dev}' 2>/dev/null || true"
-    local ip
-    ip="$(get_container_ip "$container")"
-    [[ -n "$ip" ]] && vm_exec "iptables -D FORWARD -s '${ip}' -o '$(outbound_iface)' -p tcp --dport ${CODEX_LOGIN_PORT} -j ACCEPT 2>/dev/null || true"
   fi
+
+  case "$(codex_login_action "$CODEX_LOGIN_ENABLED" "$present" "$conflict")" in
+    noop) ;;
+    add)
+      info "Forwarding port ${CODEX_LOGIN_PORT} for Codex login (grants.codexLogin)..."
+      "${SCRIPT_DIR}/sandbox-expose" "$name" "$CODEX_LOGIN_PORT" --host-port "$CODEX_LOGIN_PORT"
+      ;;
+    skip)
+      warn "grants.codexLogin: host port ${CODEX_LOGIN_PORT} is already forwarded by '${conflict}'. Codex login for '${container}' is disabled until that sandbox frees it (set its codexLogin false and restart). This sandbox otherwise started normally."
+      ;;
+    remove)
+      info "Removing Codex login port forward (grants.codexLogin off)..."
+      vm_exec "incus config device remove '${container}' '${dev}' 2>/dev/null || true"
+      local ip
+      ip="$(get_container_ip "$container")"
+      [[ -n "$ip" ]] && vm_exec "iptables -D FORWARD -s '${ip}' -o '$(outbound_iface)' -p tcp --dport ${CODEX_LOGIN_PORT} -j ACCEPT 2>/dev/null || true"
+      ;;
+  esac
 }
 
 # ── State reconcilers (shared by the create and restart paths) ──────
