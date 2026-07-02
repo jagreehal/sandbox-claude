@@ -76,10 +76,8 @@ setup() {
   done < "$(_stacks_file)"
 }
 
-# Regression guard for the "older golden image lacks codex" upgrade gap: every
-# fresh container (all stacks clone from base) must ship the Codex CLI on PATH.
-# If this fails, the golden images predate the codex install in stacks/base.sh
-# and need `sandbox-setup --rebuild all`.
+# Every container (all stacks clone from base) must ship the Codex CLI on PATH.
+# Guards the codex install in stacks/base.sh against regression.
 @test "all stack containers have codex on PATH" {
   local prefix
   prefix=$(_prefix)

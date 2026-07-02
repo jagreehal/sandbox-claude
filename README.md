@@ -898,17 +898,6 @@ sandbox proj-alpha --cmd "ls -la /home/ubuntu/.claude/"
 
 The auth token is stored inside the container at `/home/ubuntu/.claude/` and persists across container restarts. It is lost only when the container is destroyed with `--rm`.
 
-#### Codex Not Installed
-
-**Symptom:** `sandbox <name> --codex` fails with `codex: command not found`.
-
-Codex ships in the base golden image. Containers created from an image built before Codex was added won't have it. Rebuild the images (`base` plus the variants that clone from it) and recreate the container:
-
-```bash
-sandbox-setup --rebuild all
-sandbox-stop <name> --rm && sandbox-start <name> ...
-```
-
 #### Codex Auth Issues
 
 **Symptom:** `codex login` hangs after you approve the sign-in in your browser.
