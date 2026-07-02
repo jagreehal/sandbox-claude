@@ -384,7 +384,7 @@ sandbox-start my-project --cpu 4 --memory 8GiB --env NEW_VAR=value
 
 ### sandbox
 
-Session entry point. Opens a shell, runs Claude Code, or executes a command inside one or more containers. When multiple containers are specified, a tmux session is created with a pane for each.
+Session entry point. Opens a shell, runs Claude Code or Codex, or executes a command inside one or more containers. When multiple containers are specified, a tmux session is created with a pane for each.
 
 ```
 sandbox <name> [name2...] [flags]
@@ -393,6 +393,7 @@ sandbox <name> [name2...] [flags]
 | Flag | Description |
 |---|---|
 | `--claude` | Run Claude Code instead of a shell |
+| `--codex` | Run Codex CLI instead of a shell |
 | `--cmd "<command>"` | Run a specific command |
 
 All sessions use `incus exec` (via `orb run` on macOS, directly on Linux) -- no SSH dependency.
@@ -409,6 +410,9 @@ sandbox proj-alpha --claude
 
 # Run Claude Code in multiple containers (tmux, one per pane)
 sandbox proj-alpha proj-beta --claude
+
+# Run Codex in one container (grants.codexLogin: true needed for first login)
+sandbox proj-alpha --codex
 
 # Run a command in one container
 sandbox proj-alpha --cmd "git status"
@@ -430,10 +434,10 @@ sandbox-list
 No flags. Produces a table like:
 
 ```
-CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          EGRESS     DOCKER  AGENT  CLAUDE  REPO
-agent-proj-alpha       Running   1     2201  8001  9001  5432,6379      filtered   ok      ok     auth'd  me/alpha (main)
-agent-proj-beta        Running   2     2202  8002  9002  -              open       ok      no-key no-auth me/beta (main)
-agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open       -       -      -       me/gamma (dev)
+CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          EGRESS     DOCKER  AGENT  CLAUDE  CODEX   REPO
+agent-proj-alpha       Running   1     2201  8001  9001  5432,6379      filtered   ok      ok     auth'd  auth'd  me/alpha (main)
+agent-proj-beta        Running   2     2202  8002  9002  -              open       ok      no-key no-auth no-auth me/beta (main)
+agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open       -       -      -       -       me/gamma (dev)
 ```
 
 **Health check columns** (checked via `incus exec` into running containers):
@@ -444,6 +448,7 @@ agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open    
 | DOCKER | `docker info` succeeds: `ok`, fails: `err` |
 | AGENT | `ssh-add -l` succeeds: `ok`, no keys loaded: `no-key`, no socket: `none` |
 | CLAUDE | Auth token in `~/.claude/`: `auth'd`, missing: `no-auth` |
+| CODEX | Auth token in `~/.codex/auth.json`: `auth'd`, missing: `no-auth` |
 | REPO | Shortened git remote URL + current branch |
 | EXTRA | Additionally exposed ports, shown as `host→container` when ports differ (e.g. `5435→5432`) |
 
@@ -622,7 +627,8 @@ Generate one with **`sandbox-init`**, which auto-detects the stack from build-to
   },
   "grants": {
     "env": ["ANTHROPIC_API_KEY"],        // names only — values come from ~/.sandbox/env / the host
-    "sshAgent": true
+    "sshAgent": true,
+    "codexLogin": false                  // true forwards port 1455 for Codex's OAuth callback
   },
   "screen": true                         // in-cage dependency screening
 }
@@ -632,6 +638,7 @@ Generate one with **`sandbox-init`**, which auto-detects the stack from build-to
 - **Precedence** is `flag > sandbox.config.json > schema default`, so a one-off flag always wins and you never have to edit the committed file for a single run.
 - **Secrets never live in the file, and `grants.env` is a real allowlist.** It lists variable *names*; each resolves to a value from `~/.sandbox/env` (preferred) or the host environment. **When a config is present, only the listed names are forwarded** — `~/.sandbox/env` is *not* bulk-injected, so an unlisted secret stays out of the container. (Without a config, the legacy behaviour applies: all of `~/.sandbox/env` is injected.) Note this means a config must list `ANTHROPIC_API_KEY` for Claude Code to authenticate. The allowlist **converges on restart**: removing a name from `grants.env` — *or deleting `sandbox.config.json` entirely* — and restarting clears that variable from the container. A config-governed sandbox remembers it was managed, so even a full config deletion reverts cleanly to the legacy `~/.sandbox/env` behaviour without leaving old secrets behind.
 - **`grants.sshAgent`** (default `true`) controls the deploy-key SSH agent. Set it `false` and no deploy key is provisioned on create; on an **existing** sandbox, restarting with `false` fully **revokes** access — it stops the agent, removes the in-container key and SSH config, and deletes the GitHub deploy key. Git push-back and private-repo SSH clone are then disabled. An SSH remote with `sshAgent: false` and no `--ssh-key` is rejected up front (use an HTTPS remote, `sshAgent: true`, or `--ssh-key`).
+- **`grants.codexLogin`** (default `false`) forwards container port 1455 to the same host port. Codex's `codex login` OAuth flow calls back to `http://localhost:1455`; without the forward, that callback never reaches your browser and the login hangs. Set it `true` before running `sandbox <name> --codex` for the first time. Like the other grants it converges on restart — flipping it back to `false` (or removing the config) tears the forward down. Because 1455 is a single fixed host port, only **one** sandbox can hold it at a time: if another sandbox already forwards it, start warns and skips (that sandbox still starts, just without Codex login until the other one frees the port).
 - **Versions** are managed by [`mise`](https://mise.jdx.dev), baked into every golden image with each stack's latest LTS pre-warmed (so default sandboxes start instantly). `tools` only requests a deviation, which mise resolves at start. Per-project versions also work via a repo's own native `.mise.toml` / `.tool-versions`.
 
 ### Environment Variables
@@ -890,6 +897,21 @@ sandbox proj-alpha --cmd "ls -la /home/ubuntu/.claude/"
 ```
 
 The auth token is stored inside the container at `/home/ubuntu/.claude/` and persists across container restarts. It is lost only when the container is destroyed with `--rm`.
+
+#### Codex Auth Issues
+
+**Symptom:** `codex login` hangs after you approve the sign-in in your browser.
+
+- Confirm `grants.codexLogin: true` is set in `sandbox.config.json` and restart the sandbox to apply it (or run `sandbox-expose proj-alpha 1455 --host-port 1455` directly).
+- Verify the forward exists: `sandbox-list` should show port `1455` under `EXTRA`.
+- Re-run: `sandbox proj-alpha --codex`, then open the printed `http://localhost:1455/...` URL in your host browser.
+
+```bash
+# Verify auth token exists
+sandbox proj-alpha --cmd "ls -la /home/ubuntu/.codex/"
+```
+
+The auth token is stored inside the container at `/home/ubuntu/.codex/auth.json` and persists across container restarts.
 
 ### macOS Issues
 

@@ -34,6 +34,10 @@ su - ubuntu -c 'curl -fsSL https://claude.ai/install.sh | bash'
 # Ensure claude is on PATH for non-interactive shells (incus exec)
 ln -sf /home/ubuntu/.local/bin/claude /usr/local/bin/claude
 
+# Codex CLI (installed as ubuntu — credentials live under /home/ubuntu/.codex)
+su - ubuntu -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+ln -sf /home/ubuntu/.local/bin/codex /usr/local/bin/codex
+
 # ── mise — polyglot runtime version manager ─────────────────────────
 # One uniform tool for every language stack's runtime, replacing bespoke
 # per-stack version pipelines (NodeSource setup_NN.x, etc.). Stack scripts

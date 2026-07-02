@@ -70,7 +70,8 @@
       "additionalProperties": false,
       "default": {
         "env": [],
-        "sshAgent": true
+        "sshAgent": true,
+        "codexLogin": false
       },
       "properties": {
         "env": {
@@ -86,6 +87,11 @@
           "type": "boolean",
           "description": "Run the deploy-key SSH agent in the container (enables git push-back).",
           "default": true
+        },
+        "codexLogin": {
+          "type": "boolean",
+          "description": "Forward container port 1455 to the same host port, so `sandbox <name> --codex` can complete Codex's browser OAuth login (which calls back to localhost:1455) from inside the cage.",
+          "default": false
         }
       }
     },

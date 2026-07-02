@@ -94,6 +94,7 @@ print_connection_summary() {
   echo ""
   echo "  Shell:     sandbox ${name}"
   echo "  Claude:    sandbox ${name} --claude"
+  echo "  Codex:     sandbox ${name} --codex"
 }
 
 # Apply per-repo `tools` version overrides (from sandbox.config.json) inside the
@@ -117,6 +118,42 @@ apply_config_tools() {
   if [[ ${#failed[@]} -gt 0 ]]; then
     die "Could not apply tool version(s) via mise: ${failed[*]}. The sandbox would run an undeclared runtime — fix the 'tools' entries (unknown tool or bad version?) and retry."
   fi
+}
+
+# grants.codexLogin converges the port-1455 forward (Codex's fixed OAuth callback
+# port) to the desired state, like the env/egress/ssh reconcilers: enabled adds
+# it, disabled/removed tears it down. Device presence IS the state — no metadata.
+# 1455 is a single global host port, so only one sandbox can own it at a time;
+# on conflict we warn and skip rather than fail the whole start.
+CODEX_LOGIN_PORT=1455
+apply_codex_login_grant() {
+  local name="$1" container="$2"
+  local dev="port-${CODEX_LOGIN_PORT}-tcp"
+  local present="no" conflict=""
+  vm_exec "incus config device list '${container}' 2>/dev/null | grep -qx '${dev}'" && present="yes"
+  # Only probe for a conflict when we might actually add — check_port_conflict
+  # shells out, so skip it on the noop/remove paths.
+  if [[ "$CODEX_LOGIN_ENABLED" == "yes" && "$present" == "no" ]]; then
+    conflict="$(check_port_conflict "$CODEX_LOGIN_PORT" tcp "$container")"
+  fi
+
+  case "$(codex_login_action "$CODEX_LOGIN_ENABLED" "$present" "$conflict")" in
+    noop) ;;
+    add)
+      info "Forwarding port ${CODEX_LOGIN_PORT} for Codex login (grants.codexLogin)..."
+      "${SCRIPT_DIR}/sandbox-expose" "$name" "$CODEX_LOGIN_PORT" --host-port "$CODEX_LOGIN_PORT"
+      ;;
+    skip)
+      warn "grants.codexLogin: host port ${CODEX_LOGIN_PORT} is already forwarded by '${conflict}'. Codex login for '${container}' is disabled until that sandbox frees it (set its codexLogin false and restart). This sandbox otherwise started normally."
+      ;;
+    remove)
+      info "Removing Codex login port forward (grants.codexLogin off)..."
+      vm_exec "incus config device remove '${container}' '${dev}' 2>/dev/null || true"
+      local ip
+      ip="$(get_container_ip "$container")"
+      [[ -n "$ip" ]] && vm_exec "iptables -D FORWARD -s '${ip}' -o '$(outbound_iface)' -p tcp --dport ${CODEX_LOGIN_PORT} -j ACCEPT 2>/dev/null || true"
+      ;;
+  esac
 }
 
 # ── State reconcilers (shared by the create and restart paths) ──────
@@ -336,6 +373,7 @@ CONFIG_FILE="$(find_config_file "$PWD")"
 CONFIG_STACK=""
 CONFIG_TOOLS=()
 SSH_AGENT_ENABLED="yes" # config grants.sshAgent can turn the deploy-key agent off
+CODEX_LOGIN_ENABLED="no" # config grants.codexLogin=true forwards Codex's OAuth callback port
 if [[ -n "$CONFIG_FILE" ]]; then
   require_command jq
   validate_config "$CONFIG_FILE"
@@ -373,6 +411,12 @@ if [[ -n "$CONFIG_FILE" ]]; then
   if [[ -z "$SSH_KEY" && "$(config_bool "$CONFIG_FILE" '.grants.sshAgent' true)" == "false" ]]; then
     SSH_AGENT_ENABLED="no"
     warn "config grants.sshAgent is false — no deploy key; git push-back and private-repo SSH clone are disabled."
+  fi
+
+  # grants.codexLogin: true => forward Codex's OAuth callback port (1455) so
+  # `sandbox <name> --codex` can complete a real browser login from the cage.
+  if [[ "$(config_bool "$CONFIG_FILE" '.grants.codexLogin' false)" == "true" ]]; then
+    CODEX_LOGIN_ENABLED="yes"
   fi
 
   # egress.restrict: turn on domain filtering (allowlist built additively later).
@@ -469,6 +513,8 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
 
   # Egress converges to the desired state (apply / re-apply / tear down).
   apply_egress_state restart
+
+  apply_codex_login_grant "$NAME" "$CONTAINER"
 
   print_connection_summary "$CONTAINER" "$NAME" "restarted"
   exit 0
@@ -646,6 +692,8 @@ apply_egress_state create
 set_metadata "$CONTAINER" "slot" "$SLOT"
 set_metadata "$CONTAINER" "stack" "$STACK"
 [[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
+
+apply_codex_login_grant "$NAME" "$CONTAINER"
 
 # ── Clone repo ──────────────────────────────────────────────────────
 if [[ -n "$REPO" ]]; then

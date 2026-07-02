@@ -75,3 +75,14 @@ setup() {
     assert_output "$stack"
   done < "$(_stacks_file)"
 }
+
+# Every container (all stacks clone from base) must ship the Codex CLI on PATH.
+# Guards the codex install in stacks/base.sh against regression.
+@test "all stack containers have codex on PATH" {
+  local prefix
+  prefix=$(_prefix)
+  while IFS= read -r stack; do
+    run vm_run incus exec "agent-${prefix}-${stack}" -- command -v codex
+    assert_success
+  done < "$(_stacks_file)"
+}

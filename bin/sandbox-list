@@ -24,10 +24,10 @@ if [ -z "$CONTAINERS" ]; then
 fi
 
 # Header
-printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
-  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "AGENT" "CLAUDE" "REPO"
-printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
-  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "─────" "──────" "────"
+printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %-8s %s\n" \
+  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "AGENT" "CLAUDE" "CODEX" "REPO"
+printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %-8s %s\n" \
+  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "─────" "──────" "─────" "────"
 
 for c in $CONTAINERS; do
   state=$(incus info "$c" 2>/dev/null | grep "Status:" | awk '{print $2}')
@@ -71,6 +71,7 @@ for c in $CONTAINERS; do
   docker_status="-"
   agent_status="-"
   claude_status="-"
+  codex_status="-"
   repo_info="-"
 
   if [ "$state" = "RUNNING" ]; then
@@ -101,6 +102,13 @@ for c in $CONTAINERS; do
       claude_status="no-auth"
     fi
 
+    # Codex auth
+    if incus exec "$c" -- test -f /home/ubuntu/.codex/auth.json 2>/dev/null; then
+      codex_status="auth'd"
+    else
+      codex_status="no-auth"
+    fi
+
     # Repo info
     if incus exec "$c" -- test -d /workspace/project/.git 2>/dev/null; then
       remote=$(incus exec "$c" -- git -c safe.directory=/workspace/project -C /workspace/project remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]##; s#\.git$##' || echo "?")
@@ -109,9 +117,9 @@ for c in $CONTAINERS; do
     fi
   fi
 
-  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
+  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %-8s %s\n" \
     "$c" "$state" "$slot" "$ssh_p" "$app_p" "$alt_p" "$extras" \
-    "$egress_status" "$docker_status" "$agent_status" "$claude_status" "$repo_info"
+    "$egress_status" "$docker_status" "$agent_status" "$claude_status" "$codex_status" "$repo_info"
 done
 echo ""
 INNERLIST

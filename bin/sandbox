@@ -7,6 +7,7 @@
 #   sandbox proj-alpha proj-beta              # tmux with shells
 #   sandbox proj-alpha --claude               # run claude
 #   sandbox proj-alpha proj-beta --claude     # tmux with claude
+#   sandbox proj-alpha --codex                # run codex
 #   sandbox proj-alpha --cmd "git status"     # run command
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
@@ -16,6 +17,7 @@ USAGE="sandbox <name> [name2...] [flags] — open a session in one or more conta
 Modes:
   (default)         Interactive shell
   --claude          Run Claude Code
+  --codex           Run Codex CLI
   --cmd \"command\"   Run an arbitrary command
 
 Multiple names open a tmux session with one pane per container.
@@ -24,18 +26,23 @@ Examples:
   sandbox proj-alpha                       # shell into one
   sandbox proj-alpha proj-beta             # tmux with shells
   sandbox proj-alpha --claude              # run claude
+  sandbox proj-alpha --codex               # run codex
   sandbox proj-alpha --cmd \"git status\"    # run a command"
 maybe_help "$USAGE" "$@"
 
 # ── Parse args ──────────────────────────────────────────────────────
 NAMES=()
-MODE="shell" # shell | claude | cmd
+MODE="shell" # shell | claude | codex | cmd
 CMD=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --claude)
       MODE="claude"
+      shift
+      ;;
+    --codex)
+      MODE="codex"
       shift
       ;;
     --cmd)
@@ -52,7 +59,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--claude] [--cmd \"command\"]"
+[[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--claude|--codex] [--cmd \"command\"]"
 
 require_sandbox
 
@@ -78,6 +85,7 @@ build_session_argv() {
   case "$MODE" in
     shell) SESSION_ARGV+=(bash --login) ;;
     claude) SESSION_ARGV+=(bash --login -c 'claude --dangerously-skip-permissions') ;;
+    codex) SESSION_ARGV+=(bash --login -c 'codex --dangerously-bypass-approvals-and-sandbox') ;;
     cmd) SESSION_ARGV+=(bash --login -c "$CMD") ;;
   esac
 }
