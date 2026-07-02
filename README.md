@@ -638,7 +638,7 @@ Generate one with **`sandbox-init`**, which auto-detects the stack from build-to
 - **Precedence** is `flag > sandbox.config.json > schema default`, so a one-off flag always wins and you never have to edit the committed file for a single run.
 - **Secrets never live in the file, and `grants.env` is a real allowlist.** It lists variable *names*; each resolves to a value from `~/.sandbox/env` (preferred) or the host environment. **When a config is present, only the listed names are forwarded** — `~/.sandbox/env` is *not* bulk-injected, so an unlisted secret stays out of the container. (Without a config, the legacy behaviour applies: all of `~/.sandbox/env` is injected.) Note this means a config must list `ANTHROPIC_API_KEY` for Claude Code to authenticate. The allowlist **converges on restart**: removing a name from `grants.env` — *or deleting `sandbox.config.json` entirely* — and restarting clears that variable from the container. A config-governed sandbox remembers it was managed, so even a full config deletion reverts cleanly to the legacy `~/.sandbox/env` behaviour without leaving old secrets behind.
 - **`grants.sshAgent`** (default `true`) controls the deploy-key SSH agent. Set it `false` and no deploy key is provisioned on create; on an **existing** sandbox, restarting with `false` fully **revokes** access — it stops the agent, removes the in-container key and SSH config, and deletes the GitHub deploy key. Git push-back and private-repo SSH clone are then disabled. An SSH remote with `sshAgent: false` and no `--ssh-key` is rejected up front (use an HTTPS remote, `sshAgent: true`, or `--ssh-key`).
-- **`grants.codexLogin`** (default `false`) forwards container port 1455 to the same host port. Codex's `codex login` OAuth flow calls back to `http://localhost:1455`; without the forward, that callback never reaches your browser and the login hangs. Set it `true` before running `sandbox <name> --codex` for the first time. Idempotent across restarts, like the other grants.
+- **`grants.codexLogin`** (default `false`) forwards container port 1455 to the same host port. Codex's `codex login` OAuth flow calls back to `http://localhost:1455`; without the forward, that callback never reaches your browser and the login hangs. Set it `true` before running `sandbox <name> --codex` for the first time. Like the other grants it converges on restart — flipping it back to `false` (or removing the config) tears the forward down. Because 1455 is a single fixed host port, only **one** sandbox can hold it at a time: if another sandbox already forwards it, start warns and skips (that sandbox still starts, just without Codex login until the other one frees the port).
 - **Versions** are managed by [`mise`](https://mise.jdx.dev), baked into every golden image with each stack's latest LTS pre-warmed (so default sandboxes start instantly). `tools` only requests a deviation, which mise resolves at start. Per-project versions also work via a repo's own native `.mise.toml` / `.tool-versions`.
 
 ### Environment Variables
@@ -897,6 +897,17 @@ sandbox proj-alpha --cmd "ls -la /home/ubuntu/.claude/"
 ```
 
 The auth token is stored inside the container at `/home/ubuntu/.claude/` and persists across container restarts. It is lost only when the container is destroyed with `--rm`.
+
+#### Codex Not Installed
+
+**Symptom:** `sandbox <name> --codex` fails with `codex: command not found`.
+
+Codex ships in the base golden image. Containers created from an image built before Codex was added won't have it. Rebuild the images (`base` plus the variants that clone from it) and recreate the container:
+
+```bash
+sandbox-setup --rebuild all
+sandbox-stop <name> --rm && sandbox-start <name> ...
+```
 
 #### Codex Auth Issues
 

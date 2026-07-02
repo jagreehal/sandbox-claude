@@ -104,6 +104,8 @@ sandbox my-project --codex
 
 This launches `codex --dangerously-bypass-approvals-and-sandbox` — Codex's own equivalent of YOLO mode, safe here because the Incus cage is already the real sandbox boundary. The first launch prompts you to sign in with ChatGPT: Codex opens a browser OAuth flow that calls back to `http://localhost:1455`, which only reaches your browser if that port is forwarded from the container. Set `grants.codexLogin: true` in `sandbox.config.json` (see [Configuration](../README.md#configuration)) before first login so `sandbox-start` forwards it automatically; the credential is then stored inside the container and survives restarts, same as Claude's.
 
+> **Already have golden images?** Codex ships in the base image, so containers built from an older image won't have it (`codex: command not found`). Refresh with `sandbox-setup --rebuild all`, then recreate the container. New installs get it automatically.
+
 ## Step 6: See what is running
 
 ```bash
